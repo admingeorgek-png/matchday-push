@@ -1,0 +1,20 @@
+{
+  "name": "matchday-push",
+  "version": "1.0.0",
+  "description": "Backend that polls live football scores and sends real push notifications, even when the site is closed.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "web-push": "^3.6.7",
+    "node-cron": "^3.0.3",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
