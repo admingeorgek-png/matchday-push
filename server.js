@@ -111,6 +111,38 @@ app.post('/api/refresh-now', async (req, res) => {
   res.json({ ok: true, lastUpdated: siteData.lastUpdated });
 });
 
+// Same as above, but reachable by just visiting the URL in a browser (GET) —
+// handy for debugging from a phone with no way to send a POST request.
+app.get('/api/refresh-now', async (req, res) => {
+  await refreshFixturesAndStandings();
+  await refreshTransferNews();
+  res.json({ ok: true, lastUpdated: siteData.lastUpdated });
+});
+
+// Visit this in a browser to see exactly why football-data.org calls are
+// succeeding or failing, without needing to check Railway's logs.
+app.get('/api/debug', async (req, res) => {
+  const report = {
+    footballDataKeySet: Boolean(FOOTBALL_DATA_API_KEY),
+    footballDataKeyPreview: FOOTBALL_DATA_API_KEY ? `${FOOTBALL_DATA_API_KEY.slice(0, 6)}...` : null,
+    testCall: null
+  };
+  try {
+    const url = 'https://api.football-data.org/v4/competitions/PL/standings';
+    const r = await fetch(url, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
+    const body = await r.text();
+    report.testCall = {
+      url,
+      httpStatus: r.status,
+      ok: r.ok,
+      bodyPreview: body.slice(0, 300)
+    };
+  } catch (err) {
+    report.testCall = { error: err.message };
+  }
+  res.json(report);
+});
+
 app.get('/health', (req, res) => {
   res.json({ ok: true, subscribers: subscriptions.length, lastPoll: lastPollTime, lastDataRefresh: siteData.lastUpdated });
 });
