@@ -119,10 +119,15 @@ app.get('/api/refresh-now', async (req, res) => {
   res.json({ ok: true, lastUpdated: siteData.lastUpdated });
 });
 
-// Visit this in a browser to see exactly why football-data.org calls are
-// succeeding or failing, without needing to check Railway's logs.
-app.get('/api/debug', async (req, res) => {
+// Visit /health in a browser to see live diagnostics, including whether
+// football-data.org calls are succeeding.
+app.get('/health', async (req, res) => {
   const report = {
+    ok: true,
+    buildMarker: 'debug-merge-v1',
+    subscribers: subscriptions.length,
+    lastPoll: lastPollTime,
+    lastDataRefresh: siteData.lastUpdated,
     footballDataKeySet: Boolean(FOOTBALL_DATA_API_KEY),
     footballDataKeyPreview: FOOTBALL_DATA_API_KEY ? `${FOOTBALL_DATA_API_KEY.slice(0, 6)}...` : null,
     testCall: null
@@ -141,10 +146,6 @@ app.get('/api/debug', async (req, res) => {
     report.testCall = { error: err.message };
   }
   res.json(report);
-});
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, subscribers: subscriptions.length, lastPoll: lastPollTime, lastDataRefresh: siteData.lastUpdated });
 });
 
 // ---------- PUSH SENDING ----------
@@ -386,4 +387,4 @@ refreshTransferNews();
 app.listen(PORT, () => {
   console.log(`Matchday push server running on port ${PORT}`);
 });
-    
+  
