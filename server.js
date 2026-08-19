@@ -301,6 +301,11 @@ async function refreshFixturesAndStandings() {
       }
     }
 
+    // football-data.org's free tier allows 10 requests/minute — pace ourselves
+    // between EVERY individual call, not just between leagues (we make up to
+    // 2 calls per league across 6 leagues = 12 calls total).
+    if (useFD) await sleep(6500);
+
     try {
       const standings = useFD
         ? await fetchStandingsFD(league.fdCode)
@@ -322,8 +327,6 @@ async function refreshFixturesAndStandings() {
       }
     }
 
-    // football-data.org's free tier allows 10 requests/minute — pace ourselves
-    // since we make up to 2 calls per league across 6 leagues.
     if (useFD) await sleep(6500);
   }
   siteData.lastUpdated = new Date().toISOString();
@@ -387,4 +390,4 @@ refreshTransferNews();
 app.listen(PORT, () => {
   console.log(`Matchday push server running on port ${PORT}`);
 });
-      
+    
