@@ -2,9 +2,9 @@
 //
 // What this does:
 // 1. Lets visitors "subscribe" from the browser (stores a push subscription object)
-// 2. Every 45 seconds, checks a live football score feed -> sends push notifications on changes
-// 3. Every 30 minutes, refreshes fixtures + standings for 6 leagues
-// 4. Every 20 minutes, refreshes a transfer-news feed (filtered from BBC Sport's football RSS)
+// 2. Every 30 seconds, checks a live football score feed -> sends push notifications on changes
+// 3. Every minute, refreshes fixtures; standings refresh every 5 minutes
+// 4. Every 5 minutes, refreshes a transfer-news feed (filtered from BBC Sport's football RSS)
 // 5. Serves everything from GET /api/data, which the frontend polls to auto-update
 //
 // You need to deploy this somewhere that stays running 24/7 (see README.md).
@@ -63,6 +63,25 @@ const SUBS_FILE = path.join(__dirname, 'subscriptions.json');
 const SCORES_FILE = path.join(__dirname, 'last-scores.json');
 const SITE_DATA_FILE = path.join(__dirname, 'site-data.json');
 
+// Refresh policy: live scores stay below one minute; fixtures refresh every minute;
+// standings and transfer news refresh every five minutes. The football-data.org free
+// tier is limited to 10 requests/minute, so we do NOT make 12 league requests every
+// minute. Six fixture requests/minute + staggered standings requests stay within the
+// limit while keeping fixtures fresh.
+const LIVE_SCORE_INTERVAL_MS = 30 * 1000;
+const FIXTURES_INTERVAL_MS = 60 * 1000;
+const STANDINGS_INTERVAL_MS = 5 * 60 * 1000;
+const TRANSFERS_INTERVAL_MS = 5 * 60 * 1000;
+
+const EXPECTED_TABLE_SIZES = {
+  epl: 20,
+  laliga: 20,
+  seriea: 20,
+  bundesliga: 18,
+  ligue1: 18,
+  ucl: 36
+};
+
 function loadJSON(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
@@ -73,8 +92,14 @@ let lastScores = loadJSON(SCORES_FILE, {});
 let siteData = loadJSON(SITE_DATA_FILE, {
   leagues: {},
   transfers: [],
-  lastUpdated: null
+  lastUpdated: null,
+  fixturesLastUpdated: null,
+  standingsLastUpdated: null,
+  transfersLastUpdated: null,
+  staleLeagues: [],
+  expectedTableSizes: EXPECTED_TABLE_SIZES
 });
+siteData.expectedTableSizes = EXPECTED_TABLE_SIZES;
 
 // ---------- ROUTES ----------
 app.get('/vapid-public-key', (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY }));
@@ -102,7 +127,21 @@ app.post('/test-notification', async (req, res) => {
 });
 
 // The frontend polls this to auto-refresh fixtures, standings, and transfer news
-app.get('/api/data', (req, res) => res.json(siteData));
+app.get('/api/data', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.json({
+    ...siteData,
+    serverTime: new Date().toISOString(),
+    refreshIntervals: {
+      liveScoresSeconds: LIVE_SCORE_INTERVAL_MS / 1000,
+      fixturesSeconds: FIXTURES_INTERVAL_MS / 1000,
+      standingsSeconds: STANDINGS_INTERVAL_MS / 1000,
+      transfersSeconds: TRANSFERS_INTERVAL_MS / 1000
+    }
+  });
+});
 
 // Secure proxy for match stats/lineups. The API-Football key lives ONLY here,
 // server-side — never in the browser — so it can't be scraped from page source.
@@ -110,6 +149,10 @@ const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || '';
 const API_FOOTBALL_BASE = 'https://v3.football.api-sports.io';
 const API_FOOTBALL_LEAGUE_IDS = { epl: 39, laliga: 140, seriea: 135, bundesliga: 78, ligue1: 61, ucl: 2 };
 const matchStatsCache = {};
+const MATCH_DETAIL_CACHE_TTL_MS = 60 * 1000;
+let fixturesRefreshRunning = false;
+let standingsRefreshRunning = false;
+let transferRefreshRunning = false;
 
 app.get('/api/match-detail', async (req, res) => {
   if (!API_FOOTBALL_KEY) return res.json({ error: 'not_configured' });
@@ -117,8 +160,15 @@ app.get('/api/match-detail', async (req, res) => {
   const leagueId = API_FOOTBALL_LEAGUE_IDS[leagueKey];
   if (!leagueId || !home || !away || !start) return res.status(400).json({ error: 'missing_params' });
 
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
   const cacheKey = `${leagueKey}|${home}|${away}|${start}`;
-  if (matchStatsCache[cacheKey]) return res.json(matchStatsCache[cacheKey]);
+  const cached = matchStatsCache[cacheKey];
+  if (cached && Date.now() - cached.cachedAt < MATCH_DETAIL_CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
 
   try {
     const dateStr = start.slice(0, 10);
@@ -130,17 +180,32 @@ app.get('/api/match-detail', async (req, res) => {
     const match = (findData.response || []).find(m =>
       norm(m.teams.home.name) === norm(home) && norm(m.teams.away.name) === norm(away)
     );
-    if (!match) { matchStatsCache[cacheKey] = { stats: [], lineups: [] }; return res.json(matchStatsCache[cacheKey]); }
+    if (!match) {
+      const notFound = { stats: [], lineups: [], fixture: null, updatedAt: new Date().toISOString(), error: 'fixture_not_found' };
+      return res.json(notFound);
+    }
 
     const fixtureId = match.fixture.id;
-    const [statsRes, lineupsRes] = await Promise.all([
+    const [statsRes, lineupsRes, playersRes] = await Promise.all([
       fetch(`${API_FOOTBALL_BASE}/fixtures/statistics?fixture=${fixtureId}`, { headers }),
-      fetch(`${API_FOOTBALL_BASE}/fixtures/lineups?fixture=${fixtureId}`, { headers })
+      fetch(`${API_FOOTBALL_BASE}/fixtures/lineups?fixture=${fixtureId}`, { headers }),
+      fetch(`${API_FOOTBALL_BASE}/fixtures/players?fixture=${fixtureId}`, { headers })
     ]);
     const statsData = statsRes.ok ? await statsRes.json() : { response: [] };
     const lineupsData = lineupsRes.ok ? await lineupsRes.json() : { response: [] };
-    const result = { stats: statsData.response || [], lineups: lineupsData.response || [] };
-    matchStatsCache[cacheKey] = result;
+    const playersData = playersRes.ok ? await playersRes.json() : { response: [] };
+    const result = {
+      fixture: {
+        id: fixtureId,
+        status: match.fixture.status || null,
+        teams: match.teams || null
+      },
+      stats: statsData.response || [],
+      lineups: lineupsData.response || [],
+      players: playersData.response || [],
+      updatedAt: new Date().toISOString()
+    };
+    matchStatsCache[cacheKey] = { data: result, cachedAt: Date.now() };
     res.json(result);
   } catch (err) {
     console.error('Match detail proxy failed:', err.message);
@@ -213,7 +278,7 @@ async function notifyAll(title, body) {
   }
 }
 
-// ---------- LIVE SCORE POLLING (every 45s, drives push notifications) ----------
+// ---------- LIVE SCORE POLLING (every 30s, drives push notifications) ----------
 let lastPollTime = null;
 
 async function pollLiveScores() {
@@ -245,160 +310,142 @@ async function pollLiveScores() {
   }
 }
 
-// ---------- FIXTURES + STANDINGS POLLING (every 30 min) ----------
+// ---------- FIXTURES + STANDINGS POLLING ----------
 
-// football-data.org — free tier, no card required, covers EPL/La Liga/Serie A/
-// Bundesliga/Ligue 1/Champions League with full, reliable standings and fixtures.
-// Get a key at https://www.football-data.org/client/register
-async function fetchFixturesFD(fdCode) {
-  // Rolling weekly window: a few days back (to catch this week's finished
-  // results) through 7 days ahead — instead of the entire rest of the season.
-  const from = new Date(); from.setDate(from.getDate() - 3);
-  const to = new Date(); to.setDate(to.getDate() + 7);
-  const fmt = d => d.toISOString().slice(0, 10);
-  const url = `https://api.football-data.org/v4/competitions/${fdCode}/matches?dateFrom=${fmt(from)}&dateTo=${fmt(to)}`;
-  const res = await fetch(url, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
-  if (!res.ok) throw new Error(`fd fixtures ${res.status}`);
-  const data = await res.json();
-  const matches = data && data.matches ? data.matches : [];
-  const STATUS_MAP = {
-    SCHEDULED: 'scheduled', TIMED: 'scheduled',
-    IN_PLAY: 'live', PAUSED: 'ht',
-    FINISHED: 'final',
-    POSTPONED: 'postponed', SUSPENDED: 'postponed', CANCELLED: 'postponed'
-  };
-  const abbr = name => (name || '').replace(/^(FC|AC|AS|CF|SC)\s+/i, '').slice(0, 3).toUpperCase();
-  return matches.map(m => ({
-    home: m.homeTeam && m.homeTeam.name,
-    away: m.awayTeam && m.awayTeam.name,
-    homeAb: (m.homeTeam && m.homeTeam.tla) || abbr(m.homeTeam && m.homeTeam.name),
-    awayAb: (m.awayTeam && m.awayTeam.tla) || abbr(m.awayTeam && m.awayTeam.name),
-    hs: (m.score && m.score.fullTime && m.score.fullTime.home) ?? 0,
-    as: (m.score && m.score.fullTime && m.score.fullTime.away) ?? 0,
-    start: m.utcDate,
-    status: STATUS_MAP[m.status] || 'scheduled',
-    venue: m.venue || null
-  })).filter(f => f.home && f.away);
+function validateStandings(key, standings) {
+  const expected = EXPECTED_TABLE_SIZES[key];
+  if (!expected) return standings.length > 0;
+
+  // UCL 2026/27 has 36 clubs in the league phase, but the draw is not until
+  // 27 August 2026. Before the league phase exists, an empty table is valid.
+  if (key === 'ucl' && standings.length === 0) return true;
+
+  if (standings.length !== expected) {
+    console.warn(`Rejected ${key} standings: received ${standings.length}, expected ${expected}`);
+    return false;
+  }
+  return true;
 }
 
-async function fetchStandingsFD(fdCode) {
-  const url = `https://api.football-data.org/v4/competitions/${fdCode}/standings`;
-  const res = await fetch(url, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
-  if (!res.ok) throw new Error(`fd standings ${res.status}`);
-  const data = await res.json();
-  const totalTable = (data.standings || []).find(s => s.type === 'TOTAL');
-  const table = totalTable ? totalTable.table : [];
-  return table.map(t => ({
-    team: t.team && t.team.name,
-    w: t.won || 0,
-    d: t.draw || 0,
-    l: t.lost || 0,
-    pts: t.points || 0
-  })).filter(t => t.team);
-}
+async function refreshFixturesOnly() {
+  if (fixturesRefreshRunning) return;
+  fixturesRefreshRunning = true;
+  try {
+    const staleLeagues = new Set(siteData.staleLeagues || []);
 
-// TheSportsDB — used as a fallback if football-data.org is unavailable.
-async function fetchFixtures(leagueId) {
-  const url = `https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=${leagueId}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`fixtures ${res.status}`);
-  const data = await res.json();
-  const events = data && data.events ? data.events : [];
-  return events.map(ev => ({
-    home: ev.strHomeTeam,
-    away: ev.strAwayTeam,
-    hs: parseInt(ev.intHomeScore, 10) || 0,
-    as: parseInt(ev.intAwayScore, 10) || 0,
-    start: ev.strTimestamp || `${ev.dateEvent}T${ev.strTime || '00:00:00'}Z`,
-    status: 'scheduled'
-  })).filter(f => f.home && f.away);
-}
-
-async function fetchStandings(leagueId) {
-  const url = `https://www.thesportsdb.com/api/v1/json/3/lookuptable.php?l=${leagueId}&s=${SEASON}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`standings ${res.status}`);
-  const data = await res.json();
-  const table = data && data.table ? data.table : [];
-  return table.map(t => ({
-    team: t.strTeam,
-    w: parseInt(t.intWin, 10) || 0,
-    d: parseInt(t.intDraw, 10) || 0,
-    l: parseInt(t.intLoss, 10) || 0,
-    pts: parseInt(t.intPoints, 10) || 0
-  })).filter(t => t.team);
-}
-
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-
-async function refreshFixturesAndStandings() {
-  const staleLeagues = [];
-  for (const [key, league] of Object.entries(LEAGUES)) {
+  // Six fixture requests per minute are safe under the football-data.org free
+  // 10 requests/minute limit. Fetch them concurrently so one slow league does
+  // not delay all the others.
+  await Promise.all(Object.entries(LEAGUES).map(async ([key, league]) => {
     const useFD = FOOTBALL_DATA_API_KEY && league.fdCode;
-    let fixturesFresh = false, standingsFresh = false;
+    let fresh = false;
 
     try {
       const fixtures = useFD
         ? await fetchFixturesFD(league.fdCode)
         : await fetchFixtures(league.id);
-      // Only overwrite if we actually got something back — never wipe good data with an empty response
       if (fixtures.length > 0) {
         siteData.leagues[key] = siteData.leagues[key] || {};
         siteData.leagues[key].name = league.name;
         siteData.leagues[key].short = league.short;
         siteData.leagues[key].fixtures = fixtures;
-        fixturesFresh = true;
+        fresh = true;
       }
     } catch (err) {
       console.error(`Fixtures refresh failed for ${league.name}:`, err.message);
-      // If football-data.org failed (e.g. rate limit), try the fallback source once.
       if (useFD) {
         try {
           const fixtures = await fetchFixtures(league.id);
           if (fixtures.length > 0) {
             siteData.leagues[key] = siteData.leagues[key] || {};
+            siteData.leagues[key].name = league.name;
+            siteData.leagues[key].short = league.short;
             siteData.leagues[key].fixtures = fixtures;
-            fixturesFresh = true;
+            fresh = true;
           }
-        } catch (err2) { /* keep last known good data */ }
+        } catch (err2) {
+          console.error(`Fallback fixtures failed for ${league.name}:`, err2.message);
+        }
       }
     }
 
-    // football-data.org's free tier allows 10 requests/minute — pace ourselves
-    // between EVERY individual call, not just between leagues (we make up to
-    // 2 calls per league across 6 leagues = 12 calls total).
-    if (useFD) await sleep(6500);
+    if (fresh) staleLeagues.delete(key);
+    else staleLeagues.add(key);
+  }));
+
+  siteData.staleLeagues = [...staleLeagues];
+  siteData.fixturesLastUpdated = new Date().toISOString();
+  siteData.lastUpdated = siteData.fixturesLastUpdated;
+  siteData.expectedTableSizes = EXPECTED_TABLE_SIZES;
+    saveJSON(SITE_DATA_FILE, siteData);
+    console.log(`Fixtures refreshed at ${siteData.fixturesLastUpdated}`);
+  } finally {
+    fixturesRefreshRunning = false;
+  }
+}
+
+async function refreshStandingsOnly() {
+  if (standingsRefreshRunning) return;
+  standingsRefreshRunning = true;
+  try {
+    const staleLeagues = new Set(siteData.staleLeagues || []);
+
+  // Six standings requests every five minutes = well below the free API's
+  // 10 requests/minute limit. This prevents rate-limit failures while still
+  // keeping the tables current.
+  for (const [key, league] of Object.entries(LEAGUES)) {
+    const useFD = FOOTBALL_DATA_API_KEY && league.fdCode;
+    let fresh = false;
 
     try {
       const standings = useFD
         ? await fetchStandingsFD(league.fdCode)
         : await fetchStandings(league.id);
-      if (standings.length > 0) {
-        siteData.leagues[key] = siteData.leagues[key] || {};
-        siteData.leagues[key].standings = standings;
-        standingsFresh = true;
+      if (validateStandings(key, standings)) {
+        if (standings.length > 0) {
+          siteData.leagues[key] = siteData.leagues[key] || {};
+          siteData.leagues[key].name = league.name;
+          siteData.leagues[key].short = league.short;
+          siteData.leagues[key].standings = standings;
+        }
+        fresh = standings.length > 0 || key === 'ucl';
       }
     } catch (err) {
       console.error(`Standings refresh failed for ${league.name}:`, err.message);
       if (useFD) {
         try {
           const standings = await fetchStandings(league.id);
-          if (standings.length > 0) {
+          if (validateStandings(key, standings) && standings.length > 0) {
             siteData.leagues[key] = siteData.leagues[key] || {};
+            siteData.leagues[key].name = league.name;
+            siteData.leagues[key].short = league.short;
             siteData.leagues[key].standings = standings;
-            standingsFresh = true;
+            fresh = true;
           }
-        } catch (err2) { /* keep last known good data */ }
+        } catch (err2) {
+          console.error(`Fallback standings failed for ${league.name}:`, err2.message);
+        }
       }
     }
 
-    if (!fixturesFresh || !standingsFresh) staleLeagues.push(key);
-    if (useFD) await sleep(6500);
+    if (fresh) staleLeagues.delete(key);
+    else staleLeagues.add(key);
   }
-  siteData.lastUpdated = new Date().toISOString();
-  siteData.staleLeagues = staleLeagues; // leagues that fell back to cached data this cycle
-  saveJSON(SITE_DATA_FILE, siteData);
-  console.log(`Fixtures/standings refreshed at ${siteData.lastUpdated}${staleLeagues.length ? ` (stale: ${staleLeagues.join(', ')})` : ''}`);
+
+  siteData.staleLeagues = [...staleLeagues];
+  siteData.standingsLastUpdated = new Date().toISOString();
+  siteData.lastUpdated = siteData.standingsLastUpdated;
+  siteData.expectedTableSizes = EXPECTED_TABLE_SIZES;
+    saveJSON(SITE_DATA_FILE, siteData);
+    console.log(`Standings refreshed at ${siteData.standingsLastUpdated}`);
+  } finally {
+    standingsRefreshRunning = false;
+  }
+}
+
+async function refreshFixturesAndStandings() {
+  await refreshFixturesOnly();
+  await refreshStandingsOnly();
 }
 
 // ---------- TRANSFER NEWS POLLING (every 20 min) ----------
@@ -408,6 +455,8 @@ async function refreshFixturesAndStandings() {
 const TRANSFER_KEYWORDS = /\b(sign|signs|signing|transfer|joins|joining|loan|deal|move|completes move|agree(s)? (a )?deal)\b/i;
 
 async function refreshTransferNews() {
+  if (transferRefreshRunning) return;
+  transferRefreshRunning = true;
   try {
     const res = await fetch('https://feeds.bbci.co.uk/sport/football/rss.xml');
     if (!res.ok) throw new Error(`RSS ${res.status}`);
@@ -435,24 +484,37 @@ async function refreshTransferNews() {
 
     if (transferItems.length > 0) {
       siteData.transfers = transferItems;
-      siteData.lastUpdated = new Date().toISOString();
+      siteData.transfersLastUpdated = new Date().toISOString();
+      siteData.lastUpdated = siteData.transfersLastUpdated;
       saveJSON(SITE_DATA_FILE, siteData);
       console.log(`Transfer news refreshed: ${transferItems.length} items`);
     }
   } catch (err) {
     console.error('Transfer news refresh failed:', err.message);
+  } finally {
+    transferRefreshRunning = false;
   }
 }
 
 // ---------- SCHEDULES ----------
-cron.schedule('*/45 * * * * *', pollLiveScores);          // every 45 seconds
-cron.schedule('*/30 * * * *', refreshFixturesAndStandings); // every 30 minutes
-cron.schedule('*/20 * * * *', refreshTransferNews);          // every 20 minutes
+// Live scores: every 30 seconds (always under one minute).
+cron.schedule('*/30 * * * * *', pollLiveScores);
+// Fixtures: every minute.
+cron.schedule('*/1 * * * *', refreshFixturesOnly);
+// Standings: every five minutes to respect the football-data.org free API limit.
+cron.schedule('*/5 * * * *', refreshStandingsOnly);
+// Transfer/news feed: every five minutes.
+cron.schedule('*/5 * * * *', refreshTransferNews);
 
-// Run everything once at startup too, so data isn't empty while waiting for the first schedule tick
-pollLiveScores();
-refreshFixturesAndStandings();
-refreshTransferNews();
+// Run everything once at startup too, so data is not empty while waiting for a tick.
+(async () => {
+  await Promise.allSettled([
+    pollLiveScores(),
+    refreshFixturesOnly(),
+    refreshStandingsOnly(),
+    refreshTransferNews()
+  ]);
+})();
 
 app.listen(PORT, () => {
   console.log(`Matchday push server running on port ${PORT}`);
