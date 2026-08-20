@@ -104,6 +104,50 @@ app.post('/test-notification', async (req, res) => {
 // The frontend polls this to auto-refresh fixtures, standings, and transfer news
 app.get('/api/data', (req, res) => res.json(siteData));
 
+// Secure proxy for match stats/lineups. The API-Football key lives ONLY here,
+// server-side — never in the browser — so it can't be scraped from page source.
+const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || '';
+const API_FOOTBALL_BASE = 'https://v3.football.api-sports.io';
+const API_FOOTBALL_LEAGUE_IDS = { epl: 39, laliga: 140, seriea: 135, bundesliga: 78, ligue1: 61, ucl: 2 };
+const matchStatsCache = {};
+
+app.get('/api/match-detail', async (req, res) => {
+  if (!API_FOOTBALL_KEY) return res.json({ error: 'not_configured' });
+  const { leagueKey, home, away, start } = req.query;
+  const leagueId = API_FOOTBALL_LEAGUE_IDS[leagueKey];
+  if (!leagueId || !home || !away || !start) return res.status(400).json({ error: 'missing_params' });
+
+  const cacheKey = `${leagueKey}|${home}|${away}|${start}`;
+  if (matchStatsCache[cacheKey]) return res.json(matchStatsCache[cacheKey]);
+
+  try {
+    const dateStr = start.slice(0, 10);
+    const season = new Date(start).getMonth() >= 6 ? new Date(start).getFullYear() : new Date(start).getFullYear() - 1;
+    const headers = { 'x-apisports-key': API_FOOTBALL_KEY };
+    const findRes = await fetch(`${API_FOOTBALL_BASE}/fixtures?league=${leagueId}&season=${season}&date=${dateStr}`, { headers });
+    const findData = await findRes.json();
+    const norm = s => (s || '').toLowerCase().replace(/[^a-z]/g, '');
+    const match = (findData.response || []).find(m =>
+      norm(m.teams.home.name) === norm(home) && norm(m.teams.away.name) === norm(away)
+    );
+    if (!match) { matchStatsCache[cacheKey] = { stats: [], lineups: [] }; return res.json(matchStatsCache[cacheKey]); }
+
+    const fixtureId = match.fixture.id;
+    const [statsRes, lineupsRes] = await Promise.all([
+      fetch(`${API_FOOTBALL_BASE}/fixtures/statistics?fixture=${fixtureId}`, { headers }),
+      fetch(`${API_FOOTBALL_BASE}/fixtures/lineups?fixture=${fixtureId}`, { headers })
+    ]);
+    const statsData = statsRes.ok ? await statsRes.json() : { response: [] };
+    const lineupsData = lineupsRes.ok ? await lineupsRes.json() : { response: [] };
+    const result = { stats: statsData.response || [], lineups: lineupsData.response || [] };
+    matchStatsCache[cacheKey] = result;
+    res.json(result);
+  } catch (err) {
+    console.error('Match detail proxy failed:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // Manual trigger for testing without waiting for the schedule
 app.post('/api/refresh-now', async (req, res) => {
   await refreshFixturesAndStandings();
@@ -207,18 +251,33 @@ async function pollLiveScores() {
 // Bundesliga/Ligue 1/Champions League with full, reliable standings and fixtures.
 // Get a key at https://www.football-data.org/client/register
 async function fetchFixturesFD(fdCode) {
-  const url = `https://api.football-data.org/v4/competitions/${fdCode}/matches?status=SCHEDULED`;
+  // Rolling weekly window: a few days back (to catch this week's finished
+  // results) through 7 days ahead — instead of the entire rest of the season.
+  const from = new Date(); from.setDate(from.getDate() - 3);
+  const to = new Date(); to.setDate(to.getDate() + 7);
+  const fmt = d => d.toISOString().slice(0, 10);
+  const url = `https://api.football-data.org/v4/competitions/${fdCode}/matches?dateFrom=${fmt(from)}&dateTo=${fmt(to)}`;
   const res = await fetch(url, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
   if (!res.ok) throw new Error(`fd fixtures ${res.status}`);
   const data = await res.json();
   const matches = data && data.matches ? data.matches : [];
+  const STATUS_MAP = {
+    SCHEDULED: 'scheduled', TIMED: 'scheduled',
+    IN_PLAY: 'live', PAUSED: 'ht',
+    FINISHED: 'final',
+    POSTPONED: 'postponed', SUSPENDED: 'postponed', CANCELLED: 'postponed'
+  };
+  const abbr = name => (name || '').replace(/^(FC|AC|AS|CF|SC)\s+/i, '').slice(0, 3).toUpperCase();
   return matches.map(m => ({
     home: m.homeTeam && m.homeTeam.name,
     away: m.awayTeam && m.awayTeam.name,
-    hs: (m.score && m.score.fullTime && m.score.fullTime.home) || 0,
-    as: (m.score && m.score.fullTime && m.score.fullTime.away) || 0,
+    homeAb: (m.homeTeam && m.homeTeam.tla) || abbr(m.homeTeam && m.homeTeam.name),
+    awayAb: (m.awayTeam && m.awayTeam.tla) || abbr(m.awayTeam && m.awayTeam.name),
+    hs: (m.score && m.score.fullTime && m.score.fullTime.home) ?? 0,
+    as: (m.score && m.score.fullTime && m.score.fullTime.away) ?? 0,
     start: m.utcDate,
-    status: 'scheduled'
+    status: STATUS_MAP[m.status] || 'scheduled',
+    venue: m.venue || null
   })).filter(f => f.home && f.away);
 }
 
@@ -273,8 +332,10 @@ async function fetchStandings(leagueId) {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function refreshFixturesAndStandings() {
+  const staleLeagues = [];
   for (const [key, league] of Object.entries(LEAGUES)) {
     const useFD = FOOTBALL_DATA_API_KEY && league.fdCode;
+    let fixturesFresh = false, standingsFresh = false;
 
     try {
       const fixtures = useFD
@@ -286,6 +347,7 @@ async function refreshFixturesAndStandings() {
         siteData.leagues[key].name = league.name;
         siteData.leagues[key].short = league.short;
         siteData.leagues[key].fixtures = fixtures;
+        fixturesFresh = true;
       }
     } catch (err) {
       console.error(`Fixtures refresh failed for ${league.name}:`, err.message);
@@ -296,6 +358,7 @@ async function refreshFixturesAndStandings() {
           if (fixtures.length > 0) {
             siteData.leagues[key] = siteData.leagues[key] || {};
             siteData.leagues[key].fixtures = fixtures;
+            fixturesFresh = true;
           }
         } catch (err2) { /* keep last known good data */ }
       }
@@ -313,6 +376,7 @@ async function refreshFixturesAndStandings() {
       if (standings.length > 0) {
         siteData.leagues[key] = siteData.leagues[key] || {};
         siteData.leagues[key].standings = standings;
+        standingsFresh = true;
       }
     } catch (err) {
       console.error(`Standings refresh failed for ${league.name}:`, err.message);
@@ -322,16 +386,19 @@ async function refreshFixturesAndStandings() {
           if (standings.length > 0) {
             siteData.leagues[key] = siteData.leagues[key] || {};
             siteData.leagues[key].standings = standings;
+            standingsFresh = true;
           }
         } catch (err2) { /* keep last known good data */ }
       }
     }
 
+    if (!fixturesFresh || !standingsFresh) staleLeagues.push(key);
     if (useFD) await sleep(6500);
   }
   siteData.lastUpdated = new Date().toISOString();
+  siteData.staleLeagues = staleLeagues; // leagues that fell back to cached data this cycle
   saveJSON(SITE_DATA_FILE, siteData);
-  console.log(`Fixtures/standings refreshed at ${siteData.lastUpdated}`);
+  console.log(`Fixtures/standings refreshed at ${siteData.lastUpdated}${staleLeagues.length ? ` (stale: ${staleLeagues.join(', ')})` : ''}`);
 }
 
 // ---------- TRANSFER NEWS POLLING (every 20 min) ----------
@@ -390,4 +457,3 @@ refreshTransferNews();
 app.listen(PORT, () => {
   console.log(`Matchday push server running on port ${PORT}`);
 });
-    
