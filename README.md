@@ -1,68 +1,90 @@
-# MATCHDAY PUSH — live scores, minute-level fixtures and push notifications
+# MATCHDAY — Football Live Scores
 
-This backend powers the MATCHDAY football site.
+A football scores and matchday web app with live fixtures, standings, transfers/news, match details, accounts, and web push notifications.
 
-## Refresh behaviour
+## Project structure
 
-- **Live scores:** every 30 seconds.
-- **Fixtures:** every 60 seconds for all six supported competitions.
-- **Standings:** every 5 minutes. This is intentionally slower because the free football-data.org API is limited to 10 requests/minute; forcing all 12 fixture+standings requests every minute would exceed that limit and cause stale/failed data.
-- **Transfer/news feed:** every 5 minutes.
-- **Match stats + line-ups:** fetched through the secure server proxy and refreshed with a 60-second cache.
-- `/api/data` is sent with `Cache-Control: no-store` so browsers/proxies do not keep an old snapshot.
+- `frontend/` — static Netlify site
+- `backend/` — Node/Express service for live data and push notifications
+- `docs/PRODUCTION-CHECKLIST.md` — deployment and testing checklist
 
-The API response now includes:
+## Current architecture
 
-- `serverTime`
-- `fixturesLastUpdated`
-- `standingsLastUpdated`
-- `transfersLastUpdated`
-- `expectedTableSizes`
-- `staleLeagues`
-- refresh interval values
+Netlify frontend
+→ Matchday Railway backend
+→ football-data.org / TheSportsDB / API-Football / BBC RSS
 
-## Verified competition table sizes for 2026/27
+The frontend has a built-in snapshot as a fallback. The backend is the source for automatic refreshes.
 
-- Premier League: **20**
-- La Liga: **20**
-- Serie A: **20**
-- Bundesliga: **18**
-- Ligue 1: **18**
-- UEFA Champions League league phase: **36**
+## Deploy the frontend
 
-The backend rejects a domestic standings response when it contains the wrong number of teams instead of silently replacing a good table with a partial one. The Champions League is allowed to have no table before the 2026/27 league phase is formed.
+Upload the contents of `frontend/` to Netlify.
 
-## Match details
+Current frontend backend URL:
+`https://matchday-push-production.up.railway.app`
 
-Set `API_FOOTBALL_KEY` on the server. The `/api/match-detail` endpoint keeps the API key server-side and returns:
+If you move the backend, update `PUSH_SERVER_URL` in `frontend/index.html`.
 
-- fixture status
-- match stats
-- line-ups
-- player-level match statistics when the competition provides them
-- an `updatedAt` timestamp
+## Deploy the backend
 
-The endpoint never caches a match detail response for longer than 60 seconds, so line-ups/stats can update during a match.
+Deploy the `backend/` directory to Railway, Render, Fly.io, or another always-on Node host.
 
-## Environment variables
-
-Required:
+Required environment variables:
 
 - `VAPID_PUBLIC_KEY`
 - `VAPID_PRIVATE_KEY`
-- `VAPID_CONTACT_EMAIL` (optional)
 
-Recommended for complete fixtures/standings and live match details:
+Recommended:
 
 - `FOOTBALL_DATA_API_KEY`
-- `API_FOOTBALL_KEY` for line-ups and match stats
+- `API_FOOTBALL_KEY`
+- `VAPID_CONTACT_EMAIL`
+- `SEASON=2026-2027`
+- `ALLOWED_ORIGINS=https://verdant-lamington-273898.netlify.app`
 
-## Deployment
+Generate VAPID keys with:
 
-Deploy this backend to a service that stays running 24/7, such as Railway, Render, or Fly.io. Set the environment variables in the host dashboard.
+`npx web-push generate-vapid-keys`
 
-The MATCHDAY frontend must point `PUSH_SERVER_URL` at the deployed backend and poll `/api/data` at about 60 seconds or use the refresh interval returned by the API.
+Never commit real API keys or `.env` files.
 
-## Important email note
+## Health checks
 
-The confirmation-email appearance is not controlled by this backend. If Netlify Identity is generating the confirmation email and the URL is displayed as quoted text, that must be changed in the Netlify email-template/Identity settings. The frontend/backend ZIP cannot change a Netlify-managed email template.
+After deployment, open:
+
+- `/health` — backend diagnostics and football-data connectivity
+- `/api/status` — public non-secret service status
+- `/api/data` — live site data
+- `/vapid-public-key` — public push key
+
+## Important production note
+
+The backend currently uses JSON files for subscriptions and cached site data. This is suitable for testing/small deployments but should eventually be replaced with persistent database storage such as PostgreSQL.
+
+## Features already included
+
+- Fixtures and scores
+- Live score polling
+- League tables
+- Transfer/news feed
+- Where-to-watch section
+- Match detail stats/lineups/player stats
+- Accounts through Netlify Identity
+- Favourite/followed teams
+- Web push notifications
+- PWA/service worker
+- Automatic backend refresh
+- Fallback snapshot when the backend is unavailable
+
+## Next product upgrades
+
+1. Dedicated team pages
+2. Dedicated player pages
+3. Dedicated competition pages
+4. Global search
+5. Richer transfer cards with player/from/to/fee/status
+6. Persistent database storage
+7. User notification preferences
+8. Improved mobile bottom navigation
+9. More club/competition imagery and badges
+10. Production monitoring and error logging
