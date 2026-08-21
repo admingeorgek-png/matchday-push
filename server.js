@@ -46,23 +46,24 @@ app.post('/api/login',(q,r)=>{const{email,password}=q.body||{};const key=String(
 app.get('/api/user/me',(q,r)=>{const u=findUserByToken(q.query.token);if(!u)return r.status(401).json({error:'Not signed in.'});r.json({email:u.email,createdAt:u.createdAt,teams:u.teams||[]})});
 app.post('/api/user/teams',(q,r)=>{const{token,teams}=q.body||{};const u=findUserByToken(token);if(!u)return r.status(401).json({error:'Not signed in.'});users[u.email].teams=Array.isArray(teams)?teams:[];write(USR,users);r.json({ok:true,teams:users[u.email].teams})});
 app.get('/api/match-detail',async(q,r)=>{
- if(!AF)return r.json({error:'not_configured'});
+ if(!AF)return r.json({available:false,message:'Match detail source is not configured yet.'});
  try{
   const{home,away,date}=q.query;
   const day=(date||new Date().toISOString()).slice(0,10);
   const d0=new Date(day);d0.setDate(d0.getDate()-2);const d1=new Date(day);d1.setDate(d1.getDate()+2);
   const list=await json(`https://v3.football.api-sports.io/fixtures?from=${d0.toISOString().slice(0,10)}&to=${d1.toISOString().slice(0,10)}`,{headers:{'x-apisports-key':AF}});
   const norm=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
-  const fx=(list.response||[]).find(m=>norm(m.teams?.home?.name).includes(norm(home).slice(0,6))&&norm(m.teams?.away?.name).includes(norm(away).slice(0,6)));
-  if(!fx)return r.json({error:'Match detail not found for this fixture yet.'});
+  const fuzzy=(a,b)=>{a=norm(a);b=norm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))};
+  const fx=(list.response||[]).find(m=>fuzzy(m.teams?.home?.name,home)&&fuzzy(m.teams?.away?.name,away));
+  if(!fx)return r.json({available:false,message:'Match detail not found for this fixture yet. This usually means the match has not been picked up by the stats provider, or hasn\'t kicked off.'});
   const id=fx.fixture.id;
   const[lu,ev,st]=await Promise.all([
    json(`https://v3.football.api-sports.io/fixtures/lineups?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
    json(`https://v3.football.api-sports.io/fixtures/events?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
    json(`https://v3.football.api-sports.io/fixtures/statistics?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
   ]);
-  r.json({score:{home:{total:fx.goals?.home},away:{total:fx.goals?.away}},lineups:lu.response||[],events:ev.response||[],statistics:st.response||[]});
- }catch(e){r.json({error:e.message})}
+  r.json({available:true,score:{home:{total:fx.goals?.home},away:{total:fx.goals?.away}},lineups:lu.response||[],events:ev.response||[],statistics:st.response||[]});
+ }catch(e){r.json({available:false,message:e.message})}
 });
 (async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
- 
+                                                                                                                                                                                                                 
