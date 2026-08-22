@@ -13,15 +13,48 @@ const match=m=>{let f=m.score?.fullTime||{},h=m.score?.halfTime||{};return{id:m.
 const row=r=>({position:r.position,team:team(r.team),played:r.playedGames||0,won:r.won||0,draw:r.draw||0,lost:r.lost||0,goalsFor:r.goalsFor||0,goalsAgainst:r.goalsAgainst||0,goalDifference:r.goalDifference||0,points:r.points||0});
 const day=d=>d.toISOString().slice(0,10);
 const sleep=ms=>new Promise(res=>setTimeout(res,ms));
-async function fixtures(k){let c=L[k][2],n=new Date(),a=new Date(n),b=new Date(n);a.setDate(a.getDate()-3);b.setDate(b.getDate()+60);let x=await json(`https://api.football-data.org/v4/competitions/${c}/matches?dateFrom=${day(a)}&dateTo=${day(b)}`,{headers:{'X-Auth-Token':FD}});return(x.matches||[]).map(match).sort((a,b)=>new Date(a.date)-new Date(b.date))}
-async function standings(k){let x=await json(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings`,{headers:{'X-Auth-Token':FD}});return((x.standings||[]).find(s=>s.type==='TOTAL')?.table||x.standings?.[0]?.table||[]).map(row)}
-async function refresh(){let stale=new Set(Object.keys(L));let first=true;for(let k in L){try{if(!first)await sleep(7000);first=false;let f=await fixtures(k);await sleep(7000);let s=await standings(k);data.leagues[k]={name:L[k][0],short:L[k][1],fixtures:f,standings:s};if(f.length&&((k==='ucl'&&s.length===36)||s.length===L[k][3]))stale.delete(k)}catch(e){console.error(k,e.message)}}data.staleLeagues=[...stale];data.lastUpdated=new Date().toISOString();data.fixturesLastUpdated=data.lastUpdated;data.standingsLastUpdated=data.lastUpdated;write(DATA,data)}
-async function news(){try{let r=await fetch('https://feeds.bbci.co.uk/sport/football/rss.xml');let x=await r.text();let arr=[...x.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m=>{let z=m[1],v=n=>((z.match(new RegExp(`<${n}>([\\s\\S]*?)<\\/${n}>`,'i'))||[])[1]||'').replace(/<!\[CDATA\[|\]\]>/g,'').trim();return{headline:v('title'),body:v('description'),link:v('link')}}).filter(x=>/transfer|sign|deal|loan|move|joins|medical|contract/i.test(x.headline)).slice(0,20);data.transfers=arr;data.transfersLastUpdated=new Date().toISOString();data.lastUpdated=data.transfersLastUpdated;write(DATA,data)}catch(e){console.error('news',e.message)}}
+let fdQueue=Promise.resolve(),fdLastCall=0;
+function fdThrottled(u,o={}){
+ const run=fdQueue.then(async()=>{
+  const wait=Math.max(0,fdLastCall+6500-Date.now());
+  if(wait>0)await sleep(wait);
+  fdLastCall=Date.now();
+  return json(u,{...o,headers:{'X-Auth-Token':FD,...(o.headers||{})}});
+ });
+ fdQueue=run.catch(()=>{});
+ return run;
+}
 const codeToKey=Object.fromEntries(Object.entries(L).map(([k,v])=>[v[2],k]));
+async function fixtures(k){let c=L[k][2],n=new Date(),a=new Date(n),b=new Date(n);a.setDate(a.getDate()-3);b.setDate(b.getDate()+60);let x=await fdThrottled(`https://api.football-data.org/v4/competitions/${c}/matches?dateFrom=${day(a)}&dateTo=${day(b)}`);return(x.matches||[]).map(match).sort((a,b)=>new Date(a.date)-new Date(b.date))}
+async function fetchAllFixtures(){
+ const codes=Object.values(L).map(v=>v[2]).join(',');
+ let n=new Date(),a=new Date(n),b=new Date(n);a.setDate(a.getDate()-3);b.setDate(b.getDate()+60);
+ const x=await fdThrottled(`https://api.football-data.org/v4/matches?competitions=${codes}&dateFrom=${day(a)}&dateTo=${day(b)}`);
+ const byKey={};for(const k in L)byKey[k]=[];
+ for(const m of(x.matches||[])){const k=codeToKey[m.competition?.code];if(k)byKey[k].push(match(m))}
+ for(const k in byKey)byKey[k].sort((a,b)=>new Date(a.date)-new Date(b.date));
+ return byKey;
+}
+async function standings(k){let x=await fdThrottled(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings`);return((x.standings||[]).find(s=>s.type==='TOTAL')?.table||x.standings?.[0]?.table||[]).map(row)}
+async function refresh(){
+ let stale=new Set(Object.keys(L));
+ let allFixtures=null;
+ try{allFixtures=await fetchAllFixtures()}catch(e){console.error('fixtures-all',e.message)}
+ for(let k in L){
+  try{
+   let f=allFixtures?(allFixtures[k]||[]):await fixtures(k);
+   let s=await standings(k);
+   data.leagues[k]={name:L[k][0],short:L[k][1],fixtures:f,standings:s};
+   if(f.length&&((k==='ucl'&&s.length===36)||s.length===L[k][3]))stale.delete(k)
+  }catch(e){console.error(k,e.message)}
+ }
+ data.staleLeagues=[...stale];data.lastUpdated=new Date().toISOString();data.fixturesLastUpdated=data.lastUpdated;data.standingsLastUpdated=data.lastUpdated;write(DATA,data)
+}
+async function news(){try{let r=await fetch('https://feeds.bbci.co.uk/sport/football/rss.xml');let x=await r.text();let arr=[...x.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m=>{let z=m[1],v=n=>((z.match(new RegExp(`<${n}>([\\s\\S]*?)<\\/${n}>`,'i'))||[])[1]||'').replace(/<!\[CDATA\[|\]\]>/g,'').trim();return{headline:v('title'),body:v('description'),link:v('link')}}).filter(x=>/transfer|sign|deal|loan|move|joins|medical|contract/i.test(x.headline)).slice(0,20);data.transfers=arr;data.transfersLastUpdated=new Date().toISOString();data.lastUpdated=data.transfersLastUpdated;write(DATA,data)}catch(e){console.error('news',e.message)}}
 async function live(){
  lastPoll=new Date().toISOString();
  try{
-  const x=await json(`https://api.football-data.org/v4/matches?status=LIVE`,{headers:{'X-Auth-Token':FD}});
+  const x=await fdThrottled(`https://api.football-data.org/v4/matches?status=LIVE`);
   const liveStatuses=['IN_PLAY','PAUSED','LIVE','HALFTIME','EXTRA_TIME','PENALTY_SHOOTOUT'];
   for(const m of (x.matches||[])){
    const k=codeToKey[m.competition?.code];
@@ -40,7 +73,7 @@ async function live(){
  }catch(e){console.error('live',e.message)}
  write(SCO,scores);
 }
-app.get('/health',async(q,r)=>{let t=null;try{let x=await json('https://api.football-data.org/v4/competitions/PL',{headers:{'X-Auth-Token':FD}});t={ok:true,httpStatus:200,competition:x.name}}catch(e){t={ok:false,error:e.message}}r.json({ok:true,buildMarker:'matchday-backend-v2',subscribers:subs.length,lastPoll,lastDataRefresh:data.lastUpdated,footballDataKeySet:!!FD,apiFootballKeySet:!!AF,footballDataTest:t,staleLeagues:data.staleLeagues||[]})});
+app.get('/health',(q,r)=>{r.json({ok:true,buildMarker:'matchday-backend-v3',subscribers:subs.length,lastPoll,lastDataRefresh:data.lastUpdated,footballDataKeySet:!!FD,apiFootballKeySet:!!AF,leaguesLoaded:Object.keys(data.leagues||{}).length,staleLeagues:data.staleLeagues||[]})});
 app.get('/api/data',(q,r)=>r.set('Cache-Control','no-store').json({...data,serverTime:new Date().toISOString(),expectedTableSizes:Object.fromEntries(Object.entries(L).map(([k,v])=>[k,v[3]])),refreshIntervals:{liveScoresSeconds:30,fixturesSeconds:300,standingsSeconds:300,transfersSeconds:300}}));
 app.get('/api/refresh-now',async(q,r)=>{if(!busy){busy=1;await refresh();await news();busy=0}r.json({ok:true,staleLeagues:data.staleLeagues,lastUpdated:data.lastUpdated})});app.post('/api/refresh-now',async(q,r)=>{if(!busy){busy=1;await refresh();await news();busy=0}r.json({ok:true,staleLeagues:data.staleLeagues,lastUpdated:data.lastUpdated})});
 app.get('/vapid-public-key',(q,r)=>r.json({publicKey:VP}));app.post('/subscribe',(q,r)=>{if(!q.body?.endpoint)return r.status(400).json({error:'Invalid subscription'});if(!subs.some(x=>x.endpoint===q.body.endpoint))subs.push(q.body);write(SUB,subs);r.status(201).json({ok:true})});app.post('/unsubscribe',(q,r)=>{subs=subs.filter(x=>x.endpoint!==q.body?.endpoint);write(SUB,subs);r.json({ok:true})});
