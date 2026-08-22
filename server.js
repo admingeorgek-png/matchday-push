@@ -26,23 +26,12 @@ function fdThrottled(u,o={}){
 }
 const codeToKey=Object.fromEntries(Object.entries(L).map(([k,v])=>[v[2],k]));
 async function fixtures(k){let c=L[k][2],n=new Date(),a=new Date(n),b=new Date(n);a.setDate(a.getDate()-3);b.setDate(b.getDate()+60);let x=await fdThrottled(`https://api.football-data.org/v4/competitions/${c}/matches?dateFrom=${day(a)}&dateTo=${day(b)}`);return(x.matches||[]).map(match).sort((a,b)=>new Date(a.date)-new Date(b.date))}
-async function fetchAllFixtures(){
- const codes=Object.values(L).map(v=>v[2]).join(',');
- let n=new Date(),a=new Date(n),b=new Date(n);a.setDate(a.getDate()-3);b.setDate(b.getDate()+60);
- const x=await fdThrottled(`https://api.football-data.org/v4/matches?competitions=${codes}&dateFrom=${day(a)}&dateTo=${day(b)}`);
- const byKey={};for(const k in L)byKey[k]=[];
- for(const m of(x.matches||[])){const k=codeToKey[m.competition?.code];if(k)byKey[k].push(match(m))}
- for(const k in byKey)byKey[k].sort((a,b)=>new Date(a.date)-new Date(b.date));
- return byKey;
-}
 async function standings(k){let x=await fdThrottled(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings`);return((x.standings||[]).find(s=>s.type==='TOTAL')?.table||x.standings?.[0]?.table||[]).map(row)}
 async function refresh(){
  let stale=new Set(Object.keys(L));
- let allFixtures=null;
- try{allFixtures=await fetchAllFixtures()}catch(e){console.error('fixtures-all',e.message)}
  for(let k in L){
   try{
-   let f=allFixtures?(allFixtures[k]||[]):await fixtures(k);
+   let f=await fixtures(k);
    let s=await standings(k);
    data.leagues[k]={name:L[k][0],short:L[k][1],fixtures:f,standings:s};
    if(f.length&&((k==='ucl'&&s.length===36)||s.length===L[k][3]))stale.delete(k)
@@ -61,11 +50,11 @@ async function live(){
    if(!k)continue;
    const f=match(m);
    if(!liveStatuses.includes(String(f.status).toUpperCase())||f.homeScore==null||f.awayScore==null)continue;
-   const q=k+':'+f.id, prev=scores[q];
-   if(prev && (prev.home!==f.homeScore||prev.away!==f.awayScore)){
+   const q=k+':'+f.id, prev=scores[q]||{home:0,away:0};
+   if(prev.home!==f.homeScore||prev.away!==f.awayScore){
     for(const sub of subs){
      try{await webpush.sendNotification(sub,JSON.stringify({title:`⚽ ${f.homeTeam.name} ${f.homeScore}–${f.awayScore} ${f.awayTeam.name}`,body:L[k][0]+' · live score update'}));}
-     catch(e){if(e.statusCode===404||e.statusCode===410){} }
+     catch(e){if(e.statusCode===404||e.statusCode===410){subs=subs.filter(s=>s.endpoint!==sub.endpoint);write(SUB,subs)} }
     }
    }
    scores[q]={home:f.homeScore,away:f.awayScore};
@@ -82,41 +71,29 @@ app.post('/api/login',(q,r)=>{const{email,password}=q.body||{};const key=String(
 app.get('/api/user/me',(q,r)=>{const u=findUserByToken(q.query.token);if(!u)return r.status(401).json({error:'Not signed in.'});r.json({email:u.email,createdAt:u.createdAt,teams:u.teams||[]})});
 app.post('/api/user/teams',(q,r)=>{const{token,teams}=q.body||{};const u=findUserByToken(token);if(!u)return r.status(401).json({error:'Not signed in.'});users[u.email].teams=Array.isArray(teams)?teams:[];write(USR,users);r.json({ok:true,teams:users[u.email].teams})});
 app.get('/api/match-detail',async(q,r)=>{
- if(!AF)return r.json({available:false,message:'Match detail source is not configured yet.'});
  try{
-  const{home,away,date,league}=q.query;
-  const day=(date||new Date().toISOString()).slice(0,10);
-  const matchYear=parseInt(day.slice(0,4),10),matchMonth=parseInt(day.slice(5,7),10);
-  const season=matchMonth>=7?matchYear:matchYear-1;
-  const norm=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
-  const fuzzy=(a,b)=>{a=norm(a);b=norm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))};
-  let fx=null;
-  const leagueId=L[league]?.[4];
-  if(leagueId){
-   try{
-    const byLeague=await json(`https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=${season}&date=${day}`,{headers:{'x-apisports-key':AF}});
-    fx=(byLeague.response||[]).find(m=>fuzzy(m.teams?.home?.name,home)&&fuzzy(m.teams?.away?.name,away))||null;
-    if(!fx){
-     const d0=new Date(day);d0.setDate(d0.getDate()-2);const d1=new Date(day);d1.setDate(d1.getDate()+2);
-     const byLeagueRange=await json(`https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=${season}&from=${d0.toISOString().slice(0,10)}&to=${d1.toISOString().slice(0,10)}`,{headers:{'x-apisports-key':AF}});
-     fx=(byLeagueRange.response||[]).find(m=>fuzzy(m.teams?.home?.name,home)&&fuzzy(m.teams?.away?.name,away))||null;
-    }
-   }catch(e){console.error('match-detail league lookup',e.message)}
+  const{id}=q.query;
+  if(!id)return r.json({available:false,message:'No match id provided.'});
+  const m=await fdThrottled(`https://api.football-data.org/v4/matches/${id}`);
+  if(!m||!m.id)return r.json({available:false,message:'Match detail not found for this fixture yet.'});
+  const notStarted=['SCHEDULED','TIMED','POSTPONED','CANCELLED','SUSPENDED'].includes(String(m.status||'').toUpperCase());
+  if(notStarted&&!m.goals?.length&&!m.homeTeam?.lineup?.length){
+   return r.json({available:false,message:'Match details (lineups, goals, cards) become available once the match is closer to kickoff or has started.'});
   }
-  if(!fx){
-   const d0=new Date(day);d0.setDate(d0.getDate()-2);const d1=new Date(day);d1.setDate(d1.getDate()+2);
-   const list=await json(`https://v3.football.api-sports.io/fixtures?from=${d0.toISOString().slice(0,10)}&to=${d1.toISOString().slice(0,10)}`,{headers:{'x-apisports-key':AF}});
-   fx=(list.response||[]).find(m=>fuzzy(m.teams?.home?.name,home)&&fuzzy(m.teams?.away?.name,away))||null;
-  }
-  if(!fx)return r.json({available:false,message:'Match detail not found for this fixture yet. This usually means the match has not been picked up by the stats provider, or hasn\'t kicked off.'});
-  const id=fx.fixture.id;
-  const[lu,ev,st]=await Promise.all([
-   json(`https://v3.football.api-sports.io/fixtures/lineups?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
-   json(`https://v3.football.api-sports.io/fixtures/events?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
-   json(`https://v3.football.api-sports.io/fixtures/statistics?fixture=${id}`,{headers:{'x-apisports-key':AF}}).catch(()=>({response:[]})),
-  ]);
-  r.json({available:true,score:{home:{total:fx.goals?.home},away:{total:fx.goals?.away}},lineups:lu.response||[],events:ev.response||[],statistics:st.response||[]});
- }catch(e){r.json({available:false,message:e.message})}
+  r.json({
+   available:true,
+   status:m.status,
+   minute:m.minute??null,
+   score:{home:{total:m.score?.fullTime?.home??null},away:{total:m.score?.fullTime?.away??null}},
+   goals:m.goals||[],
+   bookings:m.bookings||[],
+   substitutions:m.substitutions||[],
+   lineups:[
+    {team:{name:m.homeTeam?.name},formation:m.homeTeam?.formation,startXI:m.homeTeam?.lineup||[],bench:m.homeTeam?.bench||[],statistics:m.homeTeam?.statistics||null},
+    {team:{name:m.awayTeam?.name},formation:m.awayTeam?.formation,startXI:m.awayTeam?.lineup||[],bench:m.awayTeam?.bench||[],statistics:m.awayTeam?.statistics||null}
+   ]
+  });
+ }catch(e){r.json({available:false,message:'Could not load match details right now: '+e.message})}
 });
 (async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
- 
+              
