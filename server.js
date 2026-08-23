@@ -75,6 +75,25 @@ app.post('/api/signup',(q,r)=>{const{email,password}=q.body||{};if(!email||!pass
 app.post('/api/login',(q,r)=>{const{email,password}=q.body||{};const key=String(email||'').toLowerCase().trim();const u=users[key];if(!u||hash(password||'',u.salt)!==u.passwordHash)return r.status(401).json({error:'Incorrect email or password.'});const token=crypto.randomBytes(24).toString('hex');u.token=token;write(USR,users);r.json({ok:true,token,email:key,createdAt:u.createdAt})});
 app.get('/api/user/me',(q,r)=>{const u=findUserByToken(q.query.token);if(!u)return r.status(401).json({error:'Not signed in.'});r.json({email:u.email,createdAt:u.createdAt,teams:u.teams||[]})});
 app.post('/api/user/teams',(q,r)=>{const{token,teams}=q.body||{};const u=findUserByToken(token);if(!u)return r.status(401).json({error:'Not signed in.'});users[u.email].teams=Array.isArray(teams)?teams:[];write(USR,users);r.json({ok:true,teams:users[u.email].teams})});
+const ESPN_SLUG={epl:'eng.1',laliga:'esp.1',seriea:'ita.1',bundesliga:'ger.1',ligue1:'fra.1',ucl:'uefa.champions'};
+const ESPN_HEADERS={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36','Accept':'application/json, text/plain, */*'};
+app.get('/api/debug-espn',async(q,r)=>{
+ try{
+  const{league,date}=q.query;
+  const slug=ESPN_SLUG[league];
+  if(!slug)return r.json({error:'Unknown league key. Use one of: epl, laliga, seriea, bundesliga, ligue1, ucl'});
+  const day=(date||new Date().toISOString()).slice(0,10).replace(/-/g,'');
+  const sb=await json(`https://site.api.espn.com/apis/site/v2/sports/soccer/${slug}/scoreboard?dates=${day}`,{headers:ESPN_HEADERS});
+  const events=(sb.events||[]).map(e=>({id:e.id,name:e.name,status:e.status?.type?.name,home:e.competitions?.[0]?.competitors?.find(c=>c.homeAway==='home')?.team?.displayName,away:e.competitions?.[0]?.competitors?.find(c=>c.homeAway==='away')?.team?.displayName}));
+  let summaryKeys=null,contentSample=null;
+  if(events[0]){
+   const sum=await json(`https://site.api.espn.com/apis/site/v2/sports/soccer/${slug}/summary?event=${events[0].id}`,{headers:ESPN_HEADERS});
+   summaryKeys=Object.keys(sum);
+   contentSample=sum;
+  }
+  r.json({slug,day,scoreboardEventCount:(sb.events||[]).length,events,summaryKeys,summarySample:contentSample});
+ }catch(e){r.json({error:e.message})}
+});
 function sofaFuzzy(a,b){const norm=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');a=norm(a);b=norm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))}
 const SOFA_HEADERS={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36','Accept':'application/json, text/plain, */*','Referer':'https://www.sofascore.com/','Origin':'https://www.sofascore.com'};
 async function sofaFindEventId(home,away,isoDate){
@@ -180,22 +199,4 @@ app.get('/api/match-detail',async(q,r)=>{
     const found=await sofaFindEventId(home,away,m.utcDate);
     if(found.id){
      const sofa=await sofaMatchDetail(found.id,home,away);
-     if(sofa){goalsOut=sofa.goals;bookingsOut=sofa.bookings;subsOut=sofa.substitutions;lineupsOut=sofa.lineups;hasAnyDetail=true}
-    }
-   }catch(e){console.error('sofa fallback',e.message)}
-  }
-  r.json({
-   available:true,
-   status:m.status,
-   minute:m.minute??null,
-   limited:shouldHaveDetail&&!hasAnyDetail,
-   score:{home:{total:m.score?.fullTime?.home??null},away:{total:m.score?.fullTime?.away??null}},
-   goals:goalsOut,
-   bookings:bookingsOut,
-   substitutions:subsOut,
-   lineups:lineupsOut
-  });
- }catch(e){r.json({available:false,message:'Could not load match details right now: '+e.message})}
-});
-(async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
- 
+     if(sofa){go
