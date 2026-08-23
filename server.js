@@ -153,74 +153,44 @@ app.get('/api/debug-sofascore',async(q,r)=>{
   r.json({source:'sofascore',eventId,incidents:inc,lineups:lu,statistics:st});
  }catch(e){r.json({error:e.message})}
 });
-function fotFuzzy(a,b){const norm=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');a=norm(a);b=norm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))}
-async function fotFindMatchId(home,away,isoDate){
- if(!isoDate)return null;
- const base=new Date(isoDate);
- const ymd=x=>`${x.getUTCFullYear()}${String(x.getUTCMonth()+1).padStart(2,'0')}${String(x.getUTCDate()).padStart(2,'0')}`;
- const tryDates=[base,new Date(base.getTime()-86400000),new Date(base.getTime()+86400000)];
- for(const dt of tryDates){
-  try{
-   const day=await json(`https://www.fotmob.com/api/matches?date=${ymd(dt)}`);
-   for(const lg of(day.leagues||[])){
-    const m=(lg.matches||[]).find(x=>fotFuzzy(x.home?.name,home)&&fotFuzzy(x.away?.name,away));
-    if(m)return m.id;
-   }
-  }catch(e){}
- }
- return null;
-}
-async function fotMatchDetail(matchId,homeName,awayName){
+app.get('/api/match-detail',async(q,r)=>{
  try{
-  const d=await json(`https://www.fotmob.com/api/matchDetails?matchId=${matchId}`);
-  const goals=[],bookings=[],subs=[];
-  const events=d.content?.matchFacts?.events?.events||d.content?.matchFacts?.highlights?.events||[];
-  for(const ev of events){
-   const type=String(ev.type||'').toLowerCase();
-   const minute=ev.time??ev.min??null;
-   const teamName=ev.isHome===true?homeName:ev.isHome===false?awayName:(ev.teamId&&d.general?.homeTeam?.id===ev.teamId?homeName:awayName);
-   const playerName=ev.player?.name||ev.playerName||ev.nameStr||null;
-   if(type.includes('goal')&&!type.includes('miss')){
-    goals.push({minute,scorer:{name:playerName},assist:ev.assistStr?{name:ev.assistStr}:null,team:{name:teamName}});
-   }else if(type.includes('yellowred')||type==='yellowred'){
-    bookings.push({minute,card:'YELLOW_RED',player:{name:playerName},team:{name:teamName}});
-   }else if(type.includes('yellow')){
-    bookings.push({minute,card:'YELLOW',player:{name:playerName},team:{name:teamName}});
-   }else if(type.includes('red')){
-    bookings.push({minute,card:'RED',player:{name:playerName},team:{name:teamName}});
-   }else if(type.includes('sub')){
-    subs.push({minute,playerOut:{name:ev.swapedPlayerName||ev.playerOut?.name},playerIn:{name:playerName},team:{name:teamName}});
-   }
+  const{id,home,away}=q.query;
+  if(!id)return r.json({available:false,message:'No match id provided.'});
+  const m=await fdThrottled(`https://api.football-data.org/v4/matches/${id}`,{headers:{'X-Unfold-Goals':'true','X-Unfold-Bookings':'true','X-Unfold-Subs':'true','X-Unfold-Lineups':'true'}});
+  if(!m||!m.id)return r.json({available:false,message:'Match detail not found for this fixture yet.'});
+  const notStarted=['SCHEDULED','TIMED','POSTPONED','CANCELLED','SUSPENDED'].includes(String(m.status||'').toUpperCase());
+  if(notStarted&&!m.goals?.length&&!m.homeTeam?.lineup?.length){
+   return r.json({available:false,message:'Match details (lineups, goals, cards) become available once the match is closer to kickoff or has started.'});
   }
-  const lu=d.content?.lineup?.lineup||d.content?.lineup;
-  const buildSide=side=>{
-   const players=(side?.starters||side?.players||[]).map(p=>({shirtNumber:p.shirtNumber||p.jerseyNumber||null,name:p.name||p.playerName}));
-   const bench=(side?.bench||side?.subs||[]).map(p=>({shirtNumber:p.shirtNumber||p.jerseyNumber||null,name:p.name||p.playerName}));
-   return{players,bench,formation:side?.formation||null};
-  };
-  const homeSide=lu?.[0]||lu?.home,awaySide=lu?.[1]||lu?.away;
-  const h=buildSide(homeSide),a=buildSide(awaySide);
-  const lineups=[
-   {team:{name:homeName},formation:h.formation,startXI:h.players,bench:h.bench,statistics:null},
-   {team:{name:awayName},formation:a.formation,startXI:a.players,bench:a.bench,statistics:null}
+  const shouldHaveDetail=['IN_PLAY','PAUSED','FINISHED','AWARDED','EXTRA_TIME','PENALTY_SHOOTOUT'].includes(String(m.status||'').toUpperCase());
+  let hasAnyDetail=!!((m.goals&&m.goals.length)||(m.bookings&&m.bookings.length)||(m.homeTeam?.lineup&&m.homeTeam.lineup.length)||(m.awayTeam?.lineup&&m.awayTeam.lineup.length));
+  let goalsOut=m.goals||[],bookingsOut=m.bookings||[],subsOut=m.substitutions||[];
+  let lineupsOut=[
+   {team:{name:m.homeTeam?.name},formation:m.homeTeam?.formation,startXI:m.homeTeam?.lineup||[],bench:m.homeTeam?.bench||[],statistics:m.homeTeam?.statistics||null},
+   {team:{name:m.awayTeam?.name},formation:m.awayTeam?.formation,startXI:m.awayTeam?.lineup||[],bench:m.awayTeam?.bench||[],statistics:m.awayTeam?.statistics||null}
   ];
-  const statCats=d.content?.stats?.stats||[];
-  const nameMap={'ball possession':'ball_possession','total shots':'shots','shots on target':'shots_on_goal','corners':'corner_kicks','fouls committed':'fouls','yellow cards':'yellow_cards','red cards':'red_cards'};
-  const homeStats={},awayStats={};
-  for(const cat of statCats){
-   for(const item of(cat.stats||[])){
-    const key=nameMap[String(item.title||item.key||'').toLowerCase()];
-    if(!key)continue;
-    const vals=item.stats||[];
-    const numOf=v=>{const n=parseFloat(String(v||'').replace('%',''));return isNaN(n)?0:n};
-    homeStats[key]=numOf(vals[0]);
-    awayStats[key]=numOf(vals[1]);
-   }
+  if(shouldHaveDetail&&!hasAnyDetail&&home&&away){
+   try{
+    const eventId=await sofaFindEventId(home,away,m.utcDate);
+    if(eventId){
+     const sofa=await sofaMatchDetail(eventId,home,away);
+     if(sofa){goalsOut=sofa.goals;bookingsOut=sofa.bookings;subsOut=sofa.substitutions;lineupsOut=sofa.lineups;hasAnyDetail=true}
+    }
+   }catch(e){console.error('sofa fallback',e.message)}
   }
-  if(lineups[0])lineups[0].statistics=Object.keys(homeStats).length?homeStats:null;
-  if(lineups[1])lineups[1].statistics=Object.keys(awayStats).length?awayStats:null;
-  const hasAny=goals.length||bookings.length||subs.length||lineups.some(t=>t.startXI.length);
-  return hasAny?{goals,bookings,substitutions:subs,lineups}:null;
- }catch(e){console.error('fotmob detail',e.message);return null}
-}
-app.get('/api
+  r.json({
+   available:true,
+   status:m.status,
+   minute:m.minute??null,
+   limited:shouldHaveDetail&&!hasAnyDetail,
+   score:{home:{total:m.score?.fullTime?.home??null},away:{total:m.score?.fullTime?.away??null}},
+   goals:goalsOut,
+   bookings:bookingsOut,
+   substitutions:subsOut,
+   lineups:lineupsOut
+  });
+ }catch(e){r.json({available:false,message:'Could not load match details right now: '+e.message})}
+});
+(async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
+                                                                                              
