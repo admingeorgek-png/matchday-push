@@ -136,11 +136,20 @@ app.get('/api/debug-highlightly',async(q,r)=>{
  try{
   if(!HL)return r.json({error:'HIGHLIGHTLY_API_KEY is not set on the server yet.'});
   const{home,away,date}=q.query;
-  const matchId=await hlFindMatchId(home,away,date);
-  if(!matchId)return r.json({error:'No matching Highlightly match found for those team names/date.'});
-  const raw=await json(`https://soccer.highlightly.net/matches/${matchId}`,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
-  const lu=await json(`https://soccer.highlightly.net/lineups/${matchId}`,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
-  r.json({matchId,match:raw,lineups:lu});
+  const day=(date||'').slice(0,10);
+  const exactUrl=`https://soccer.highlightly.net/matches?homeTeamName=${encodeURIComponent(home||'')}&awayTeamName=${encodeURIComponent(away||'')}&date=${day}`;
+  const exactRes=await json(exactUrl,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
+  const dateOnlyUrl=`https://soccer.highlightly.net/matches?date=${day}&leagueName=Premier%20League`;
+  const dateOnlyRes=await json(dateOnlyUrl,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
+  const dateOnlyList=dateOnlyRes.data||dateOnlyRes||[];
+  const sampleMatchNames=Array.isArray(dateOnlyList)?dateOnlyList.slice(0,15).map(m=>`${m.homeTeam?.name} vs ${m.awayTeam?.name}`):null;
+  r.json({
+   exactQueryUrl:exactUrl,
+   exactQueryResult:exactRes,
+   dateOnlyQueryUrl:dateOnlyUrl,
+   dateOnlyMatchCount:Array.isArray(dateOnlyList)?dateOnlyList.length:null,
+   dateOnlySampleNames:sampleMatchNames
+  });
  }catch(e){r.json({error:e.message})}
 });
 app.get('/api/match-detail',async(q,r)=>{
@@ -183,4 +192,3 @@ app.get('/api/match-detail',async(q,r)=>{
  }catch(e){r.json({available:false,message:'Could not load match details right now: '+e.message})}
 });
 (async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
-                                                                                              
