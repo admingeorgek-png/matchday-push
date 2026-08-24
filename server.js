@@ -76,7 +76,24 @@ app.post('/api/login',(q,r)=>{const{email,password}=q.body||{};const key=String(
 app.get('/api/user/me',(q,r)=>{const u=findUserByToken(q.query.token);if(!u)return r.status(401).json({error:'Not signed in.'});r.json({email:u.email,createdAt:u.createdAt,teams:u.teams||[]})});
 app.post('/api/user/teams',(q,r)=>{const{token,teams}=q.body||{};const u=findUserByToken(token);if(!u)return r.status(401).json({error:'Not signed in.'});users[u.email].teams=Array.isArray(teams)?teams:[];write(USR,users);r.json({ok:true,teams:users[u.email].teams})});
 const HL=(process.env.HIGHLIGHTLY_API_KEY||'').trim();
-const HL_HEADERS={'x-rapidapi-key':HL};
+const HL_HOSTS=[
+ {base:'https://soccer.highlightly.net',headers:{'x-rapidapi-key':HL}},
+ {base:'https://football-highlights-api.p.rapidapi.com',headers:{'x-rapidapi-key':HL,'x-rapidapi-host':'football-highlights-api.p.rapidapi.com'}}
+];
+let hlWorkingHostIdx=null;
+async function hlFetch(path){
+ if(!HL)throw new Error('HIGHLIGHTLY_API_KEY not set');
+ const order=hlWorkingHostIdx!=null?[HL_HOSTS[hlWorkingHostIdx],...HL_HOSTS.filter((_,i)=>i!==hlWorkingHostIdx)]:HL_HOSTS;
+ let lastErr=null;
+ for(const h of order){
+  try{
+   const res=await json(`${h.base}${path}`,{headers:h.headers});
+   hlWorkingHostIdx=HL_HOSTS.indexOf(h);
+   return res;
+  }catch(e){lastErr=e}
+ }
+ throw lastErr;
+}
 function hlNorm(s){return String(s||'').toLowerCase().replace(/[^a-z]/g,'')}
 const HL_LEAGUE_NAME={epl:'Premier League',laliga:'La Liga',seriea:'Serie A',bundesliga:'Bundesliga',ligue1:'Ligue 1',ucl:'UEFA Champions League'};
 function hlFuzzy(a,b){a=hlNorm(a);b=hlNorm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))}
@@ -85,27 +102,27 @@ async function hlFindMatchId(home,away,isoDate,leagueKey){
  const day=isoDate.slice(0,10);
  const leagueName=HL_LEAGUE_NAME[leagueKey];
  const attempts=[];
- if(leagueName)attempts.push(`https://soccer.highlightly.net/matches?date=${day}&leagueName=${encodeURIComponent(leagueName)}`);
- attempts.push(`https://soccer.highlightly.net/matches?date=${day}`);
+ if(leagueName)attempts.push(`/matches?date=${day}&leagueName=${encodeURIComponent(leagueName)}`);
+ attempts.push(`/matches?date=${day}`);
  const d0=new Date(isoDate);const prev=new Date(d0.getTime()-86400000).toISOString().slice(0,10);const next=new Date(d0.getTime()+86400000).toISOString().slice(0,10);
  if(leagueName){
-  attempts.push(`https://soccer.highlightly.net/matches?date=${prev}&leagueName=${encodeURIComponent(leagueName)}`);
-  attempts.push(`https://soccer.highlightly.net/matches?date=${next}&leagueName=${encodeURIComponent(leagueName)}`);
+  attempts.push(`/matches?date=${prev}&leagueName=${encodeURIComponent(leagueName)}`);
+  attempts.push(`/matches?date=${next}&leagueName=${encodeURIComponent(leagueName)}`);
  }
- for(const url of attempts){
+ for(const path of attempts){
   try{
-   const res=await json(url,{headers:HL_HEADERS});
+   const res=await hlFetch(path);
    const list=Array.isArray(res)?res:(res.data||[]);
    const match=list.find(m=>hlFuzzy(m.homeTeam?.name,home)&&hlFuzzy(m.awayTeam?.name,away));
    if(match)return match.id;
-  }catch(e){console.error('hl find attempt',url,e.message)}
+  }catch(e){console.error('hl find attempt',path,e.message)}
  }
  return null;
 }
 async function hlMatchDetail(matchId){
  if(!HL)return null;
  try{
-  const raw=await json(`https://soccer.highlightly.net/matches/${matchId}`,{headers:HL_HEADERS});
+  const raw=await hlFetch(`/matches/${matchId}`);
   const m=Array.isArray(raw)?raw[0]:(raw.data?.[0]||raw);
   if(!m)return null;
   const goals=[],bookings=[],subs=[];
@@ -129,7 +146,7 @@ async function hlMatchDetail(matchId){
   }
   let lineups=[{team:{name:m.homeTeam?.name},formation:null,startXI:[],bench:[],statistics:null},{team:{name:m.awayTeam?.name},formation:null,startXI:[],bench:[],statistics:null}];
   try{
-   const lu=await json(`https://soccer.highlightly.net/lineups/${matchId}`,{headers:HL_HEADERS});
+   const lu=await hlFetch(`/lineups/${matchId}`);
    const build=side=>{
     const flat=(side?.initialLineup||[]).flat().map(p=>({shirtNumber:p.number||null,name:p.name}));
     const bench=(side?.substitutes||[]).map(p=>({shirtNumber:p.number||null,name:p.name}));
@@ -150,17 +167,19 @@ app.get('/api/debug-highlightly',async(q,r)=>{
  try{
   if(!HL)return r.json({error:'HIGHLIGHTLY_API_KEY is not set on the server yet.'});
   const{home,away,date,league}=q.query;
-  const matchId=await hlFindMatchId(home,away,date,league);
-  const leagueName=HL_LEAGUE_NAME[league];
   const day=(date||'').slice(0,10);
-  const listUrl=leagueName?`https://soccer.highlightly.net/matches?date=${day}&leagueName=${encodeURIComponent(leagueName)}`:`https://soccer.highlightly.net/matches?date=${day}`;
-  const listRes=await json(listUrl,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
+  const leagueName=HL_LEAGUE_NAME[league];
+  const path=leagueName?`/matches?date=${day}&leagueName=${encodeURIComponent(leagueName)}`:`/matches?date=${day}`;
+  let listRes,authError=null;
+  try{listRes=await hlFetch(path)}catch(e){authError=e.message}
+  if(authError)return r.json({authError,note:'Both the Highlightly-direct and RapidAPI auth methods failed with this key — check that HIGHLIGHTLY_API_KEY is copied correctly with no extra spaces.'});
   const list=Array.isArray(listRes)?listRes:(listRes.data||listRes);
   const sampleNames=Array.isArray(list)?list.slice(0,15).map(m=>`${m.homeTeam?.name} vs ${m.awayTeam?.name}`):null;
-  if(!matchId)return r.json({found:false,listUrl,matchCount:Array.isArray(list)?list.length:null,sampleNames,rawListResponse:!Array.isArray(list)?list:undefined});
-  const raw=await json(`https://soccer.highlightly.net/matches/${matchId}`,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
-  const lu=await json(`https://soccer.highlightly.net/lineups/${matchId}`,{headers:HL_HEADERS}).catch(e=>({error:e.message}));
-  r.json({found:true,matchId,match:raw,lineups:lu});
+  const matchId=await hlFindMatchId(home,away,date,league);
+  if(!matchId)return r.json({found:false,workingAuthMethod:hlWorkingHostIdx===0?'highlightly-direct':'rapidapi',matchCount:Array.isArray(list)?list.length:null,sampleNames,rawListResponse:!Array.isArray(list)?list:undefined});
+  const raw=await hlFetch(`/matches/${matchId}`).catch(e=>({error:e.message}));
+  const lu=await hlFetch(`/lineups/${matchId}`).catch(e=>({error:e.message}));
+  r.json({found:true,workingAuthMethod:hlWorkingHostIdx===0?'highlightly-direct':'rapidapi',matchId,match:raw,lineups:lu});
  }catch(e){r.json({error:e.message})}
 });
 app.get('/api/match-detail',async(q,r)=>{
@@ -194,13 +213,4 @@ app.get('/api/match-detail',async(q,r)=>{
    status:m.status,
    minute:m.minute??null,
    limited:shouldHaveDetail&&!hasAnyDetail,
-   score:{home:{total:m.score?.fullTime?.home??null},away:{total:m.score?.fullTime?.away??null}},
-   goals:goalsOut,
-   bookings:bookingsOut,
-   substitutions:subsOut,
-   lineups:lineupsOut
-  });
- }catch(e){r.json({available:false,message:'Could not load match details right now: '+e.message})}
-});
-(async()=>{await Promise.allSettled([refresh(),news()]);await live()})();cron.schedule('*/30 * * * * *',live);cron.schedule('*/5 * * * *',refresh);cron.schedule('*/5 * * * *',news);app.listen(PORT,()=>console.log('Matchday backend v3 on '+PORT));
-  
+   score:{home:{total:m.sc
