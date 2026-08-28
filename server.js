@@ -525,4 +525,210 @@ async function hlMatchDetail(matchId) {
         const bench = (side?.substitutes || []).map((p) => ({ shirtNumber: p.number || null, name: p.name }));
         return { startXI: flat, bench, formation: side?.formation || null };
       };
-      const h = build(lu.h
+      const h = build(lu.homeTeam);
+      const a = build(lu.awayTeam);
+      lineups = [
+        { team: { name: m.homeTeam?.name }, formation: h.formation, startXI: h.startXI, bench: h.bench, statistics: null },
+        { team: { name: m.awayTeam?.name }, formation: a.formation, startXI: a.startXI, bench: a.bench, statistics: null },
+      ];
+    } catch (e) {
+      console.error('hl lineups', e.message);
+    }
+
+    const nameMap = [
+      [/possession/, 'ball_possession'],
+      [/shots?\s*on\s*target/, 'shots_on_goal'],
+      [/total\s*shots|^shots$/, 'shots'],
+      [/corner/, 'corner_kicks'],
+      [/foul/, 'fouls'],
+      [/yellow/, 'yellow_cards'],
+      [/red/, 'red_cards'],
+    ];
+    const mapStats = (arr) => {
+      const out = {};
+      for (const it of arr || []) {
+        const dn = String(it.displayName || '').toLowerCase();
+        for (const [re, key] of nameMap) {
+          if (re.test(dn)) {
+            const n = parseFloat(String(it.value).replace('%', ''));
+            out[key] = isNaN(n) ? 0 : n;
+            break;
+          }
+        }
+      }
+      return Object.keys(out).length ? out : null;
+    };
+    if (m.statistics?.[0]) lineups[0].statistics = mapStats(m.statistics[0].statistics);
+    if (m.statistics?.[1]) lineups[1].statistics = mapStats(m.statistics[1].statistics);
+
+    const hasAny = goals.length || bookings.length || subs.length || lineups.some((t) => t.startXI.length);
+    return hasAny ? { goals, bookings, substitutions: subs, lineups } : null;
+  } catch (e) {
+    console.error('hl detail', e.message);
+    return null;
+  }
+}
+
+app.get('/api/debug-highlightly', async (q, r) => {
+  try {
+    if (!HL) return r.json({ error: 'HIGHLIGHTLY_API_KEY is not set on the server yet.' });
+    const { home, away, date, league } = q.query;
+    const dayStr = (date || '').slice(0, 10);
+    const leagueName = HL_LEAGUE_NAME[league];
+    const listPath = leagueName
+      ? `/matches?date=${dayStr}&leagueName=${encodeURIComponent(leagueName)}`
+      : `/matches?date=${dayStr}`;
+
+    let listRes;
+    let authError = null;
+    try {
+      listRes = await hlFetch(listPath);
+    } catch (e) {
+      authError = e.message;
+    }
+    if (authError) {
+      return r.json({
+        authError,
+        note: 'Both the Highlightly-direct and RapidAPI auth methods failed with this key — check that HIGHLIGHTLY_API_KEY is copied correctly with no extra spaces.',
+      });
+    }
+
+    const list = Array.isArray(listRes) ? listRes : listRes.data || listRes;
+    const sampleNames = Array.isArray(list) ? list.slice(0, 15).map((m) => `${m.homeTeam?.name} vs ${m.awayTeam?.name}`) : null;
+    const matchId = await hlFindMatchId(home, away, date, league);
+    const authMethod = hlWorkingHostIdx === 0 ? 'highlightly-direct' : 'rapidapi';
+
+    if (!matchId) {
+      return r.json({
+        found: false,
+        workingAuthMethod: authMethod,
+        matchCount: Array.isArray(list) ? list.length : null,
+        sampleNames,
+        rawListResponse: !Array.isArray(list) ? list : undefined,
+      });
+    }
+
+    const raw = await hlFetch(`/matches/${matchId}`).catch((e) => ({ error: e.message }));
+    const lu = await hlFetch(`/lineups/${matchId}`).catch((e) => ({ error: e.message }));
+    r.json({ found: true, workingAuthMethod: authMethod, matchId, match: raw, lineups: lu });
+  } catch (e) {
+    r.json({ error: e.message });
+  }
+});
+
+// ===== Match detail (main endpoint) =====
+app.get('/api/match-detail', async (q, r) => {
+  try {
+    const { id, home, away, league } = q.query;
+    if (!id) return r.json({ available: false, message: 'No match id provided.' });
+
+    // Try the already-cached fixture data first (instant, no network wait) instead of
+    // going through the shared football-data.org queue, which can be busy for a while
+    // during a periodic refresh cycle.
+    let m = null;
+    const cachedLeague = league && data.leagues[league];
+    const cachedFixture = cachedLeague?.fixtures?.find((f) => String(f.id) === String(id));
+    if (cachedFixture) {
+      m = {
+        id: cachedFixture.id,
+        status: cachedFixture.status,
+        utcDate: cachedFixture.utcDate,
+        minute: null,
+        score: { fullTime: { home: cachedFixture.homeScore, away: cachedFixture.awayScore } },
+        homeTeam: { name: cachedFixture.homeTeam?.name },
+        awayTeam: { name: cachedFixture.awayTeam?.name },
+        goals: [],
+        bookings: [],
+        substitutions: [],
+      };
+    } else {
+      // Fall back to a live lookup only if we don't already have this match cached.
+      m = await fdThrottled(`https://api.football-data.org/v4/matches/${id}`, {
+        headers: { 'X-Unfold-Goals': 'true', 'X-Unfold-Bookings': 'true', 'X-Unfold-Subs': 'true', 'X-Unfold-Lineups': 'true' },
+      });
+    }
+    if (!m || !m.id) return r.json({ available: false, message: 'Match detail not found for this fixture yet.' });
+
+    const notStarted = ['SCHEDULED', 'TIMED', 'POSTPONED', 'CANCELLED', 'SUSPENDED'].includes(String(m.status || '').toUpperCase());
+    if (notStarted && !m.goals?.length && !m.homeTeam?.lineup?.length) {
+      return r.json({
+        available: false,
+        message: 'Match details (lineups, goals, cards) become available once the match is closer to kickoff or has started.',
+      });
+    }
+
+    const shouldHaveDetail = ['IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED', 'EXTRA_TIME', 'PENALTY_SHOOTOUT'].includes(
+      String(m.status || '').toUpperCase()
+    );
+    let hasAnyDetail = !!(
+      (m.goals && m.goals.length) ||
+      (m.bookings && m.bookings.length) ||
+      (m.homeTeam?.lineup && m.homeTeam.lineup.length) ||
+      (m.awayTeam?.lineup && m.awayTeam.lineup.length)
+    );
+
+    let goalsOut = m.goals || [];
+    let bookingsOut = m.bookings || [];
+    let subsOut = m.substitutions || [];
+    let lineupsOut = [
+      {
+        team: { name: m.homeTeam?.name },
+        formation: m.homeTeam?.formation,
+        startXI: m.homeTeam?.lineup || [],
+        bench: m.homeTeam?.bench || [],
+        statistics: m.homeTeam?.statistics || null,
+      },
+      {
+        team: { name: m.awayTeam?.name },
+        formation: m.awayTeam?.formation,
+        startXI: m.awayTeam?.lineup || [],
+        bench: m.awayTeam?.bench || [],
+        statistics: m.awayTeam?.statistics || null,
+      },
+    ];
+
+    if (shouldHaveDetail && !hasAnyDetail && home && away) {
+      try {
+        const matchId = await hlFindMatchId(home, away, m.utcDate, league);
+        if (matchId) {
+          const hl = await hlMatchDetail(matchId);
+          if (hl) {
+            goalsOut = hl.goals;
+            bookingsOut = hl.bookings;
+            subsOut = hl.substitutions;
+            lineupsOut = hl.lineups;
+            hasAnyDetail = true;
+          }
+        }
+      } catch (e) {
+        console.error('hl fallback', e.message);
+      }
+    }
+
+    r.json({
+      available: true,
+      status: m.status,
+      minute: m.minute ?? null,
+      limited: shouldHaveDetail && !hasAnyDetail,
+      score: { home: { total: m.score?.fullTime?.home ?? null }, away: { total: m.score?.fullTime?.away ?? null } },
+      goals: goalsOut,
+      bookings: bookingsOut,
+      substitutions: subsOut,
+      lineups: lineupsOut,
+    });
+  } catch (e) {
+    r.json({ available: false, message: 'Could not load match details right now: ' + e.message });
+  }
+});
+
+// ===== Startup =====
+(async () => {
+  await Promise.allSettled([refresh(), news()]);
+  await live();
+})();
+
+cron.schedule('*/30 * * * * *', live);
+cron.schedule('*/5 * * * *', refresh);
+cron.schedule('*/5 * * * *', news);
+
+app.listen(PORT, () => console.log('Matchday backend v3 on ' + PORT));
