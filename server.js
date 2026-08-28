@@ -622,9 +622,31 @@ app.get('/api/match-detail', async (q, r) => {
     const { id, home, away, league } = q.query;
     if (!id) return r.json({ available: false, message: 'No match id provided.' });
 
-    const m = await fdThrottled(`https://api.football-data.org/v4/matches/${id}`, {
-      headers: { 'X-Unfold-Goals': 'true', 'X-Unfold-Bookings': 'true', 'X-Unfold-Subs': 'true', 'X-Unfold-Lineups': 'true' },
-    });
+    // Try the already-cached fixture data first (instant, no network wait) instead of
+    // going through the shared football-data.org queue, which can be busy for a while
+    // during a periodic refresh cycle.
+    let m = null;
+    const cachedLeague = league && data.leagues[league];
+    const cachedFixture = cachedLeague?.fixtures?.find((f) => String(f.id) === String(id));
+    if (cachedFixture) {
+      m = {
+        id: cachedFixture.id,
+        status: cachedFixture.status,
+        utcDate: cachedFixture.utcDate,
+        minute: null,
+        score: { fullTime: { home: cachedFixture.homeScore, away: cachedFixture.awayScore } },
+        homeTeam: { name: cachedFixture.homeTeam?.name },
+        awayTeam: { name: cachedFixture.awayTeam?.name },
+        goals: [],
+        bookings: [],
+        substitutions: [],
+      };
+    } else {
+      // Fall back to a live lookup only if we don't already have this match cached.
+      m = await fdThrottled(`https://api.football-data.org/v4/matches/${id}`, {
+        headers: { 'X-Unfold-Goals': 'true', 'X-Unfold-Bookings': 'true', 'X-Unfold-Subs': 'true', 'X-Unfold-Lineups': 'true' },
+      });
+    }
     if (!m || !m.id) return r.json({ available: false, message: 'Match detail not found for this fixture yet.' });
 
     const notStarted = ['SCHEDULED', 'TIMED', 'POSTPONED', 'CANCELLED', 'SUSPENDED'].includes(String(m.status || '').toUpperCase());
