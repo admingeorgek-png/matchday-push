@@ -219,28 +219,27 @@ async function refresh() {
 
 const TRN = path.join(__dirname, 'seen-transfers.json');
 let seenTransfers = read(TRN, null); // null = first run, don't notify on startup backlog
-const NEWSDATA_KEY = (process.env.NEWSDATA_API_KEY || '').trim();
+const CURRENTS_KEY = (process.env.CURRENTS_API_KEY || '').trim();
 
 async function news() {
   try {
-    if (!NEWSDATA_KEY) {
-      console.error('NEWSDATA_API_KEY not set — transfer news will stay empty until it is added.');
+    if (!CURRENTS_KEY) {
+      console.error('CURRENTS_API_KEY not set — transfer news will stay empty until it is added.');
       return;
     }
-    const query = encodeURIComponent(
-      'football transfer OR "here we go" OR medical OR "advanced talks" OR "in talks" OR agrees OR loan move'
-    );
-    const url = `https://newsdata.io/api/1/latest?apikey=${NEWSDATA_KEY}&q=${query}&language=en&category=sports`;
+    const keywords = encodeURIComponent('football transfer');
+    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=20&apiKey=${CURRENTS_KEY}`;
     const res = await json(url);
-    const arr = (res.results || [])
+    const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
+    const arr = (res.news || [])
       .map((a) => ({
         headline: a.title || '',
         body: a.description || '',
-        link: a.link || '',
-        image: a.image_url || null,
-        source: a.source_id || a.source_name || '',
+        link: a.url || '',
+        image: a.image && a.image !== 'None' ? a.image : null,
+        source: a.author || '',
       }))
-      .filter((a) => a.headline)
+      .filter((a) => a.headline && transferPattern.test(a.headline))
       .slice(0, 20);
 
     const isFirstRun = seenTransfers === null;
@@ -325,7 +324,8 @@ app.get('/health', (q, r) => {
     footballDataKeySet: !!FD,
     apiFootballKeySet: !!AF,
     highlightlyKeySet: !!HL,
-    newsdataKeySet: !!NEWSDATA_KEY,
+    currentsKeySet: !!CURRENTS_KEY,
+    currentsKeySet: !!CURRENTS_KEY,
     leaguesLoaded: Object.keys(data.leagues || {}).length,
     staleLeagues: data.staleLeagues || [],
   });
@@ -733,6 +733,6 @@ app.get('/api/match-detail', async (q, r) => {
 
 cron.schedule('*/30 * * * * *', live);
 cron.schedule('*/5 * * * *', refresh);
-cron.schedule('*/20 * * * *', news);
+cron.schedule('*/10 * * * *', news);
 
 app.listen(PORT, () => console.log('Matchday backend v3 on ' + PORT));
