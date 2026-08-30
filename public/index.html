@@ -17,6 +17,7 @@ main{max-width:1180px;margin:auto;padding:22px 18px}.statusgrid{display:grid;gri
 .mdet-score{font-size:30px;font-weight:900;letter-spacing:1px}
 .mdet-status{margin-top:2px;font-size:12px;color:#8fa4bd}
 .mdet-scorers{text-align:center;font-size:12px;color:#c3d3e6;margin:6px 0 4px;line-height:1.7}
+.mdet-team-scorers{font-size:11px;font-weight:600;color:#c3d3e6;line-height:1.6;margin-top:2px}
 .mdtabs{display:flex;gap:6px;overflow-x:auto;margin:14px 0 12px;padding-bottom:2px}
 .mdtab{flex:0 0 auto;background:#101d2c;border:1px solid #263c54;color:#9fb1c7;border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer}
 .mdtab.active{background:#fff;color:#0a1626;border-color:#fff}
@@ -95,6 +96,7 @@ function predictPct(home,away,standings){
  return{home:h,draw:d,away:a}
 }
 function norm(s){return String(s||'').toLowerCase().replace(/[^a-z]/g,'')}
+function mdFuzzyTeam(a,b){a=norm(a);b=norm(b);if(!a||!b)return false;return a.includes(b)||b.includes(a)||a.includes(b.slice(0,Math.min(6,b.length)))||b.includes(a.slice(0,Math.min(6,a.length)))}
 function predictBar(home,away,standings){
  const p=predictPct(home,away,standings);
  return `<div class="predict"><div class="predict-label"><span>${p.home}% Win</span><span>${p.draw}% Draw</span><span>${p.away}% Win</span></div><div class="predict-bar"><span style="width:${p.home}%;background:#1769d3" title="${esc(home?.name)} win"></span><span style="width:${p.draw}%;background:#5b6b80" title="Draw"></span><span style="width:${p.away}%;background:#e0533d" title="${esc(away?.name)} win"></span></div></div>`
@@ -146,17 +148,20 @@ function renderMdBody(){const d=mdData,info=mdInfoCur;const box=$('#mdTabBody');
 }
 async function openMatchPage(info){$('#comps').style.display='none';$('#competitions').style.display='none';$('#footergrid').style.display='none';$('#statusgrid').style.display='none';$('#hero').style.display='none';$('#myTeamsPage').style.display='none';$('#accountPage').style.display='none';$('#viewpage').style.display='none';$('#matchDetailPage').style.display='block';const body=$('#modalBody');mdTab='timeline';mdData=null;mdInfoCur=info;
 const instantPrediction=predictBar({name:info.home},{name:info.away},D.leagues[info.league]?.standings);
-body.innerHTML=`<div class="mdet-header"><div class="mdet-team">${info.homeLogo?`<img class="mdet-crest" src="${esc(info.homeLogo)}">`:''}<span>${esc(info.home)}</span></div><div class="mdet-scorebox"><div class="mdet-score" id="mdScoreLive">···</div><div class="mdet-status" id="mdStatusLive"><span class="muted">Loading…</span></div></div><div class="mdet-team">${info.awayLogo?`<img class="mdet-crest" src="${esc(info.awayLogo)}">`:''}<span>${esc(info.away)}</span></div></div><div id="mdScorerLine"></div>${instantPrediction}${renderMdTabs()}<div id="mdTabBody"><p class="muted">Loading match details…</p></div>`;
+body.innerHTML=`<div class="mdet-header"><div class="mdet-team">${info.homeLogo?`<img class="mdet-crest" src="${esc(info.homeLogo)}">`:''}<span>${esc(info.home)}</span><div class="mdet-team-scorers" id="mdHomeScorers"></div></div><div class="mdet-scorebox"><div class="mdet-score" id="mdScoreLive">···</div><div class="mdet-status" id="mdStatusLive"><span class="muted">Loading…</span></div></div><div class="mdet-team">${info.awayLogo?`<img class="mdet-crest" src="${esc(info.awayLogo)}">`:''}<span>${esc(info.away)}</span><div class="mdet-team-scorers" id="mdAwayScorers"></div></div></div>${instantPrediction}${renderMdTabs()}<div id="mdTabBody"><p class="muted">Loading match details…</p></div>`;
 window.scrollTo({top:0,behavior:'smooth'});
 document.querySelectorAll('.mdtab').forEach(b=>b.onclick=()=>{mdTab=b.dataset.mdtab;document.querySelectorAll('.mdtab').forEach(x=>x.classList.toggle('active',x===b));renderMdBody()});
 try{const r=await fetch(`/api/match-detail?id=${encodeURIComponent(info.id)}&home=${encodeURIComponent(info.home||'')}&away=${encodeURIComponent(info.away||'')}&league=${encodeURIComponent(info.league||'')}`,{cache:'no-store'});const d=await r.json();if(!d.available){$('#mdStatusLive').innerHTML=`<span class="muted">${esc(d.message||"Match details are not available for this fixture yet.")}</span>`;$('#mdTabBody').innerHTML='';return}
 mdData=d;
 const live=isLiveMatch({status:d.status});
 const statusLabel=live?`<span class="live-badge" style="justify-content:center"><span class="dot"></span>LIVE · ${d.minute?`${d.minute}'`:`<span class="live-clock" data-kickoff="${esc(info.date)}"></span>`}</span>`:d.status==='PAUSED'?'<span class="live-badge ht" style="justify-content:center"><span class="dot"></span>HT</span>':(d.status==='FINISHED'||d.status==='AWARDED')?'<span class="date ft">FT</span>':fmt(info.date);
-const scorerLine=(d.goals||[]).length?`<div class="mdet-scorers">${d.goals.map(g=>`⚽ ${esc(g.scorer?.name)} ${g.minute??''}${g.injuryTime?'+'+g.injuryTime:''}'`).join(' &nbsp;·&nbsp; ')}</div>`:'';
+const scorerHtml=goals=>goals.map(g=>`⚽ ${esc(g.scorer?.name)} ${g.minute??''}${g.injuryTime?'+'+g.injuryTime:''}'`).join('<br>');
+const homeGoals=(d.goals||[]).filter(g=>mdFuzzyTeam(g.team?.name,info.home));
+const awayGoals=(d.goals||[]).filter(g=>mdFuzzyTeam(g.team?.name,info.away));
 $('#mdScoreLive').textContent=`${d.score?.home?.total??'-'} - ${d.score?.away?.total??'-'}`;
 $('#mdStatusLive').innerHTML=statusLabel;
-$('#mdScorerLine').innerHTML=scorerLine;
+$('#mdHomeScorers').innerHTML=scorerHtml(homeGoals);
+$('#mdAwayScorers').innerHTML=scorerHtml(awayGoals);
 tickLiveClocks();
 renderMdBody();
 }catch(e){$('#mdStatusLive').innerHTML='<span class="muted">Could not load</span>';$('#mdTabBody').innerHTML='<p class="muted">Could not load match details right now. Please try again shortly.</p>'}}
