@@ -228,19 +228,21 @@ async function news() {
       return;
     }
     const keywords = encodeURIComponent('football transfer');
-    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=20&apiKey=${CURRENTS_KEY}`;
+    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=50&apiKey=${CURRENTS_KEY}`;
     const res = await json(url);
     const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
     const arr = (res.news || [])
-      .map((a) => ({
+      .map((a, i) => ({
+        id: a.id || i,
         headline: a.title || '',
         body: a.description || '',
         link: a.url || '',
         image: a.image && a.image !== 'None' ? a.image : null,
         source: a.author || '',
+        published: a.published || null,
       }))
       .filter((a) => a.headline && transferPattern.test(a.headline))
-      .slice(0, 20);
+      .slice(0, 50);
 
     const isFirstRun = seenTransfers === null;
     const seenSet = new Set(seenTransfers || []);
