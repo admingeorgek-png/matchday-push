@@ -200,15 +200,32 @@ async function standings(k) {
 
 async function refresh() {
   const stale = new Set(Object.keys(L));
+  data.leagueErrors = data.leagueErrors || {};
   for (const k in L) {
+    let f = null;
+    let s = null;
     try {
-      const f = await fixtures(k);
-      const s = await standings(k);
-      data.leagues[k] = { name: L[k][0], short: L[k][1], fixtures: f, standings: s };
-      if (f.length && ((k === 'ucl' && s.length === 36) || s.length === L[k][3])) stale.delete(k);
+      f = await fixtures(k);
+      delete data.leagueErrors[k + ':fixtures'];
     } catch (e) {
-      console.error(k, e.message);
+      data.leagueErrors[k + ':fixtures'] = e.message;
+      console.error(k, 'fixtures', e.message);
     }
+    try {
+      s = await standings(k);
+      delete data.leagueErrors[k + ':standings'];
+    } catch (e) {
+      data.leagueErrors[k + ':standings'] = e.message;
+      console.error(k, 'standings', e.message);
+    }
+    // Keep whichever part succeeded (and fall back to the previous cached value for
+    // whichever part failed) instead of discarding everything just because one of
+    // the two calls failed.
+    const prev = data.leagues[k] || {};
+    const fx = f !== null ? f : prev.fixtures || [];
+    const st = s !== null ? s : prev.standings || [];
+    data.leagues[k] = { name: L[k][0], short: L[k][1], fixtures: fx, standings: st };
+    if (fx.length && ((k === 'ucl' && st.length === 36) || st.length === L[k][3])) stale.delete(k);
   }
   data.staleLeagues = [...stale];
   data.lastUpdated = new Date().toISOString();
@@ -224,12 +241,14 @@ const CURRENTS_KEY = (process.env.CURRENTS_API_KEY || '').trim();
 async function news() {
   try {
     if (!CURRENTS_KEY) {
+      data.newsDebug = { error: 'CURRENTS_API_KEY not set.' };
       console.error('CURRENTS_API_KEY not set — transfer news will stay empty until it is added.');
       return;
     }
     const keywords = encodeURIComponent('football transfer');
     const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=50&apiKey=${CURRENTS_KEY}`;
     const res = await json(url);
+    const rawCount = (res.news || []).length;
     const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
     const arr = (res.news || [])
       .map((a, i) => ({
@@ -243,6 +262,13 @@ async function news() {
       }))
       .filter((a) => a.headline && transferPattern.test(a.headline))
       .slice(0, 50);
+
+    data.newsDebug = {
+      apiStatus: res.status || null,
+      rawArticleCount: rawCount,
+      afterFilterCount: arr.length,
+      sampleRawHeadlines: (res.news || []).slice(0, 5).map((a) => a.title),
+    };
 
     const isFirstRun = seenTransfers === null;
     const seenSet = new Set(seenTransfers || []);
@@ -273,6 +299,7 @@ async function news() {
     data.lastUpdated = data.transfersLastUpdated;
     write(DATA, data);
   } catch (e) {
+    data.newsDebug = { error: e.message };
     console.error('news', e.message);
   }
 }
@@ -327,9 +354,10 @@ app.get('/health', (q, r) => {
     apiFootballKeySet: !!AF,
     highlightlyKeySet: !!HL,
     currentsKeySet: !!CURRENTS_KEY,
-    currentsKeySet: !!CURRENTS_KEY,
     leaguesLoaded: Object.keys(data.leagues || {}).length,
     staleLeagues: data.staleLeagues || [],
+    leagueErrors: data.leagueErrors || {},
+    newsDebug: data.newsDebug || null,
   });
 });
 
