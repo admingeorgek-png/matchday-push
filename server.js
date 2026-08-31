@@ -288,7 +288,7 @@ async function news() {
       return;
     }
     const keywords = encodeURIComponent('football transfer');
-    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=10&apiKey=${CURRENTS_KEY}`;
+    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&apiKey=${CURRENTS_KEY}`;
     const res = await json(url);
     const rawCount = (res.news || []).length;
     const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
