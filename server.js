@@ -205,8 +205,19 @@ async function fixtures(k) {
 }
 
 async function standings(k) {
-  const x = await fdThrottled(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings`);
-  return ((x.standings || []).find((s) => s.type === 'TOTAL')?.table || x.standings?.[0]?.table || []).map(row);
+  try {
+    const x = await fdThrottled(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings`);
+    return ((x.standings || []).find((s) => s.type === 'TOTAL')?.table || x.standings?.[0]?.table || []).map(row);
+  } catch (e) {
+    // Some competitions (notably Champions League before/around the season's kickoff) can
+    // 404 on the default "current season" standings request. Retry once with an explicit
+    // season year before giving up, since that resolves it in some cases.
+    if (!String(e.message).startsWith('404')) throw e;
+    const now = new Date();
+    const season = now.getUTCMonth() + 1 >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+    const x = await fdThrottled(`https://api.football-data.org/v4/competitions/${L[k][2]}/standings?season=${season}`);
+    return ((x.standings || []).find((s) => s.type === 'TOTAL')?.table || x.standings?.[0]?.table || []).map(row);
+  }
 }
 
 async function refresh() {
@@ -277,7 +288,7 @@ async function news() {
       return;
     }
     const keywords = encodeURIComponent('football transfer');
-    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=50&apiKey=${CURRENTS_KEY}`;
+    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_size=30&apiKey=${CURRENTS_KEY}`;
     const res = await json(url);
     const rawCount = (res.news || []).length;
     const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
@@ -292,7 +303,7 @@ async function news() {
         published: a.published || null,
       }))
       .filter((a) => a.headline && transferPattern.test(a.headline))
-      .slice(0, 50);
+      .slice(0, 30);
 
     data.newsDebug = {
       apiStatus: res.status || null,
