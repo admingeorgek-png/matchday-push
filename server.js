@@ -728,17 +728,25 @@ app.get('/api/match-detail', async (q, r) => {
     }
     if (!m || !m.id) return r.json({ available: false, message: 'Match detail not found for this fixture yet.' });
 
-    const notStarted = ['SCHEDULED', 'TIMED', 'POSTPONED', 'CANCELLED', 'SUSPENDED'].includes(String(m.status || '').toUpperCase());
-    if (notStarted && !m.goals?.length && !m.homeTeam?.lineup?.length) {
+    const statusUpper = String(m.status || '').toUpperCase();
+    const abandoned = ['POSTPONED', 'CANCELLED', 'SUSPENDED'].includes(statusUpper);
+    const notYetKickedOff = ['SCHEDULED', 'TIMED'].includes(statusUpper);
+    const minutesToKickoff = m.utcDate ? (new Date(m.utcDate).getTime() - Date.now()) / 60000 : Infinity;
+    // Lineups are typically published around an hour before kickoff, so start trying once
+    // we're within that window instead of blocking every scheduled match outright.
+    const withinLineupWindow = notYetKickedOff && minutesToKickoff <= 75;
+
+    if (abandoned || (notYetKickedOff && !withinLineupWindow && !m.goals?.length && !m.homeTeam?.lineup?.length)) {
       return r.json({
         available: false,
-        message: 'Match details (lineups, goals, cards) become available once the match is closer to kickoff or has started.',
+        message: abandoned
+          ? 'This match has been postponed, cancelled, or suspended.'
+          : 'Match details (lineups, goals, cards) become available around an hour before kickoff.',
       });
     }
 
-    const shouldHaveDetail = ['IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED', 'EXTRA_TIME', 'PENALTY_SHOOTOUT'].includes(
-      String(m.status || '').toUpperCase()
-    );
+    const shouldHaveDetail =
+      ['IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED', 'EXTRA_TIME', 'PENALTY_SHOOTOUT'].includes(statusUpper) || withinLineupWindow;
     let hasAnyDetail = !!(
       (m.goals && m.goals.length) ||
       (m.bookings && m.bookings.length) ||
