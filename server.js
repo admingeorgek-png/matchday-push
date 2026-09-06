@@ -83,6 +83,71 @@ function write(file, value) {
   }
 }
 
+// ===== Durable storage via Upstash Redis (survives redeploys) =====
+// Render's free tier wipes its local disk on every redeploy, which was silently
+// erasing user accounts, push subscriptions, and other data every time we shipped
+// a fix. This adds a small persistence layer on top of the same local files above:
+// the local file stays as an instant in-memory-backed cache for the running process,
+// while a copy is also durably stored in Upstash Redis and restored on startup.
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').trim();
+const UPSTASH_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+const persistenceEnabled = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+async function redisGet(key) {
+  if (!persistenceEnabled) return null;
+  try {
+    const res = await fetch(UPSTASH_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(['GET', key]),
+    });
+    const j = await res.json();
+    return j.result ?? null;
+  } catch (e) {
+    console.error('redisGet', key, e.message);
+    return null;
+  }
+}
+async function redisSet(key, value) {
+  if (!persistenceEnabled) return;
+  try {
+    await fetch(UPSTASH_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(['SET', key, value]),
+    });
+  } catch (e) {
+    console.error('redisSet', key, e.message);
+  }
+}
+// Call this alongside write() for anything that must survive a redeploy
+// (user accounts, push subscriptions, seen-transfer/score history) — NOT the
+// big frequently-refreshed fixtures/standings cache, to stay well within the
+// free 10,000-commands/day Redis quota.
+function persistWrite(key, value) {
+  redisSet(key, JSON.stringify(value)).catch(() => {});
+}
+async function hydrateFromRedis() {
+  if (!persistenceEnabled) {
+    console.error('UPSTASH_REDIS_REST_URL/TOKEN not set — user accounts will NOT survive redeploys until this is configured.');
+    return;
+  }
+  const targets = [
+    ['users', (v) => (users = v)],
+    ['subscriptions', (v) => (subs = v)],
+    ['last-scores', (v) => (scores = v)],
+    ['seen-transfers', (v) => (seenTransfers = v)],
+  ];
+  for (const [key, setter] of targets) {
+    try {
+      const raw = await redisGet(key);
+      if (raw != null) setter(JSON.parse(raw));
+    } catch (e) {
+      console.error('hydrate', key, e.message);
+    }
+  }
+}
+
 let data = read(DATA, { leagues: {}, transfers: [], staleLeagues: Object.keys(L) });
 let subs = read(SUB, []);
 let scores = read(SCO, {});
@@ -328,6 +393,7 @@ async function news() {
             if (e.statusCode === 404 || e.statusCode === 410) {
               subs = subs.filter((s) => s.endpoint !== sub.endpoint);
               write(SUB, subs);
+              persistWrite('subscriptions', subs);
             }
           }
         }
@@ -335,6 +401,7 @@ async function news() {
     }
     seenTransfers = arr.map((a) => a.link).filter(Boolean);
     write(TRN, seenTransfers);
+    persistWrite('seen-transfers', seenTransfers);
 
     data.transfers = arr;
     data.transfersLastUpdated = new Date().toISOString();
@@ -372,6 +439,7 @@ async function live() {
             if (e.statusCode === 404 || e.statusCode === 410) {
               subs = subs.filter((s) => s.endpoint !== sub.endpoint);
               write(SUB, subs);
+              persistWrite('subscriptions', subs);
             }
           }
         }
@@ -382,6 +450,7 @@ async function live() {
     console.error('live', e.message);
   }
   write(SCO, scores);
+  persistWrite('last-scores', scores);
 }
 
 // ===== Core routes =====
@@ -398,6 +467,8 @@ app.get('/health', (q, r) => {
     currentsKeySet: !!CURRENTS_KEY,
     resendKeySet: !!RESEND_KEY,
     adminEmailSet: !!ADMIN_EMAIL,
+    persistenceEnabled,
+    registeredUsers: Object.keys(users || {}).length,
     leaguesLoaded: Object.keys(data.leagues || {}).length,
     staleLeagues: data.staleLeagues || [],
     leagueErrors: data.leagueErrors || {},
@@ -433,11 +504,13 @@ app.post('/subscribe', (q, r) => {
   if (!q.body?.endpoint) return r.status(400).json({ error: 'Invalid subscription' });
   if (!subs.some((x) => x.endpoint === q.body.endpoint)) subs.push(q.body);
   write(SUB, subs);
+              persistWrite('subscriptions', subs);
   r.status(201).json({ ok: true });
 });
 app.post('/unsubscribe', (q, r) => {
   subs = subs.filter((x) => x.endpoint !== q.body?.endpoint);
   write(SUB, subs);
+              persistWrite('subscriptions', subs);
   r.json({ ok: true });
 });
 
@@ -452,6 +525,7 @@ app.post('/api/signup', (q, r) => {
   const createdAt = new Date().toISOString();
   users[key] = { salt, passwordHash: hash(password, salt), token, createdAt, teams: [] };
   write(USR, users);
+  persistWrite('users', users);
   notifyAdminOfSignup(key); // fire-and-forget; never blocks or fails the signup itself
   r.status(201).json({ ok: true, token, email: key, createdAt });
 });
@@ -464,6 +538,7 @@ app.post('/api/login', (q, r) => {
   const token = crypto.randomBytes(24).toString('hex');
   u.token = token;
   write(USR, users);
+  persistWrite('users', users);
   r.json({ ok: true, token, email: key, createdAt: u.createdAt });
 });
 
@@ -479,6 +554,7 @@ app.post('/api/user/teams', (q, r) => {
   if (!u) return r.status(401).json({ error: 'Not signed in.' });
   users[u.email].teams = Array.isArray(teams) ? teams : [];
   write(USR, users);
+  persistWrite('users', users);
   r.json({ ok: true, teams: users[u.email].teams });
 });
 
@@ -810,6 +886,8 @@ app.get('/api/match-detail', async (q, r) => {
 
 // ===== Startup =====
 (async () => {
+  await hydrateFromRedis(); // restore users/subscriptions/scores before accepting requests
+  app.listen(PORT, () => console.log('Matchday backend v3 on ' + PORT));
   await Promise.allSettled([refresh(), news()]);
   await live();
 })();
@@ -817,5 +895,3 @@ app.get('/api/match-detail', async (q, r) => {
 cron.schedule('*/30 * * * * *', live);
 cron.schedule('*/5 * * * *', refresh);
 cron.schedule('*/10 * * * *', news);
-
-app.listen(PORT, () => console.log('Matchday backend v3 on ' + PORT));
