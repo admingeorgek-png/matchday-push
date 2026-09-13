@@ -34,7 +34,8 @@ app.use(
 
 // ===== Service worker (served directly so it can never go missing from the repo) =====
 const SW_JS = `self.addEventListener('push',e=>{let d={title:'MATCHDAY PUSH',body:'Live match update'};try{d=JSON.parse(e.data.text())}catch{}e.waitUntil(self.registration.showNotification(d.title,{body:d.body,silent:false,vibrate:[200,100,200],icon:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAACGklEQVR4nO3TMQHAIADAsLGHGwX4VwkyOJoo6NMx1z4fRP2vA+AlA5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYg7QJ3IQK2JZYKuQAAAABJRU5ErkJggg==',badge:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAACGklEQVR4nO3TMQHAIADAsLGHGwX4VwkyOJoo6NMx1z4fRP2vA+AlA5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYgzQCkGYA0A5BmANIMQJoBSDMAaQYg7QJ3IQK2JZYKuQAAAABJRU5ErkJggg==',data:{url:'/'}}))});
-self.addEventListener('notificationclick',e=>{e.notification.close();e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(cs=>{for(const c of cs){if('focus'in c){c.focus();return c}}return clients.openWindow(e.notification.data?.url||'/')}))});`;
+self.addEventListener('notificationclick',e=>{e.notification.close();e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(cs=>{for(const c of cs){if('focus'in c){c.focus();return c}}return clients.openWindow(e.notification.data?.url||'/')}))});
+self.addEventListener('fetch',e=>{e.respondWith(fetch(e.request))});`;
 
 app.get('/sw.js', (q, r) => {
   r.set('Content-Type', 'application/javascript; charset=utf-8');
@@ -353,11 +354,27 @@ async function news() {
       return;
     }
     const keywords = encodeURIComponent('football transfer');
-    const url = `https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&apiKey=${CURRENTS_KEY}`;
-    const res = await json(url);
-    const rawCount = (res.news || []).length;
+    // Pull two pages instead of one to roughly double the article pool before filtering.
+    const pageResults = await Promise.all(
+      [1, 2].map((page) =>
+        json(`https://api.currentsapi.services/v1/search?keywords=${keywords}&language=en&page_number=${page}&apiKey=${CURRENTS_KEY}`).catch(
+          (e) => ({ news: [], error: e.message })
+        )
+      )
+    );
+    const seenUrls = new Set();
+    const rawArticles = [];
+    for (const pr of pageResults) {
+      for (const a of pr.news || []) {
+        if (a.url && !seenUrls.has(a.url)) {
+          seenUrls.add(a.url);
+          rawArticles.push(a);
+        }
+      }
+    }
+    const rawCount = rawArticles.length;
     const transferPattern = /transfer|sign(s|ed|ing)?|deal|loan|move|joins?|medical|contract|here we go|negotiat|advanced talks|in talks|agree(s|d|ment)?|bid|fee|unveil|announce|official|confirm|target|linked|swoop|swap/i;
-    const arr = (res.news || [])
+    const arr = rawArticles
       .map((a, i) => ({
         id: a.id || i,
         headline: a.title || '',
@@ -368,13 +385,14 @@ async function news() {
         published: a.published || null,
       }))
       .filter((a) => a.headline && transferPattern.test(a.headline))
-      .slice(0, 30);
+      .slice(0, 50);
 
     data.newsDebug = {
-      apiStatus: res.status || null,
+      apiStatus: pageResults[0]?.status || null,
       rawArticleCount: rawCount,
       afterFilterCount: arr.length,
-      sampleRawHeadlines: (res.news || []).slice(0, 5).map((a) => a.title),
+      pageErrors: pageResults.map((p) => p.error).filter(Boolean),
+      sampleRawHeadlines: rawArticles.slice(0, 5).map((a) => a.title),
     };
 
     const isFirstRun = seenTransfers === null;
@@ -894,4 +912,4 @@ app.get('/api/match-detail', async (q, r) => {
 
 cron.schedule('*/30 * * * * *', live);
 cron.schedule('*/5 * * * *', refresh);
-cron.schedule('*/10 * * * *', news);
+cron.schedule('*/15 * * * *', news);
