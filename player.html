@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MATCHDAY Player</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">MATCH<span>DAY</span></div>
+    <nav class="topnav" aria-label="Extra features">
+      <a href="index.html">Fixtures</a>
+      <a href="lineup.html">Lineups</a>
+      <a href="news.html">News</a>
+      <a href="search.html">Search</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <a class="back-link" href="index.html">&larr; Back to fixtures</a>
+
+  <div class="profile">
+    <div class="avatar">MR</div>
+    <div>
+      <h1>M. Rashford</h1>
+      <p class="subtle">Manchester United &middot; Forward &middot; #10</p>
+    </div>
+  </div>
+
+  <div class="stat-grid">
+    <div><b>28</b><span class="label">Appearances</span></div>
+    <div><b>14</b><span class="label">Goals</span></div>
+    <div><b>6</b><span class="label">Assists</span></div>
+    <div><b>3</b><span class="label">Yellow cards</span></div>
+  </div>
+
+  <h2>Recent matches</h2>
+  <div class="card">
+    <div class="match-row"><span>vs Brighton</span><span>1 goal</span></div>
+    <div class="match-row"><span>vs Fulham</span><span>1 assist</span></div>
+    <div class="match-row"><span>vs Aston Villa</span><span class="subtle">No goal involvement</span></div>
+  </div>
+
+  <p class="subtle" style="margin-top:14px">Stats update after each fixture once results are confirmed by the data provider.</p>
+</main>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

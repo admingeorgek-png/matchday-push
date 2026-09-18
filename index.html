@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MATCHDAY Extra</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">MATCH<span>DAY</span></div>
+    <nav class="topnav" aria-label="Extra features">
+      <a href="index.html" aria-current="page">Fixtures</a>
+      <a href="lineup.html">Lineups</a>
+      <a href="news.html">News</a>
+      <a href="search.html">Search</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Fixtures</h1>
+  <p class="subtle">Yesterday, today and tomorrow across your followed competitions.</p>
+
+  <div class="date-strip" role="tablist" aria-label="Select day">
+    <button data-day="yesterday" aria-current="false">Yesterday</button>
+    <button data-day="today" aria-current="true">Today</button>
+    <button data-day="tomorrow" aria-current="false">Tomorrow</button>
+  </div>
+
+  <div id="fixture-list"></div>
+
+  <h2 style="margin-top:34px">More in MATCHDAY Extra</h2>
+  <div class="feature-grid">
+    <a href="lineup.html">Visual lineups<small>Official XI from ~1h before kickoff</small></a>
+    <a href="search.html">Global search<small>Teams, players, competitions</small></a>
+    <a href="news.html">News & transfers<small>Latest stories, in-app</small></a>
+    <a href="player.html">Player pages<small>Season stats & form</small></a>
+  </div>
+</main>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

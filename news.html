@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MATCHDAY News</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">MATCH<span>DAY</span></div>
+    <nav class="topnav" aria-label="Extra features">
+      <a href="index.html">Fixtures</a>
+      <a href="lineup.html">Lineups</a>
+      <a href="news.html" aria-current="page">News</a>
+      <a href="search.html">Search</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <a class="back-link" href="index.html">&larr; Back to fixtures</a>
+  <h1>News & transfers</h1>
+  <p class="subtle">Stories stay inside MATCHDAY. No redirects to outside sites.</p>
+
+  <div class="filter-row" role="tablist" aria-label="Filter news">
+    <button aria-pressed="true">All</button>
+    <button aria-pressed="false">Latest News</button>
+    <button aria-pressed="false">Transfers</button>
+    <button aria-pressed="false">Rumours</button>
+  </div>
+
+  <div id="news-list"></div>
+</main>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

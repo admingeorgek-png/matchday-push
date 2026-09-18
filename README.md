@@ -1,90 +1,32 @@
-# MATCHDAY — Football Live Scores
+# MATCHDAY Extra
 
-A football scores and matchday web app with live fixtures, standings, transfers/news, match details, accounts, and web push notifications.
+A self-contained addition to MATCHDAY. Nothing here replaces or edits existing MATCHDAY files — drop this folder in alongside the main app and link to it from your existing navigation.
 
-## Project structure
+## Pages
+- `index.html` — Yesterday / Today / Tomorrow fixtures, with live-match indicator
+- `lineup.html` — visual pitch lineup with numbered players and substitutes
+- `player.html` — player profile with season stats and recent matches
+- `news.html` — in-app news list with category filtering
+- `article.html` — full article view (stays inside MATCHDAY, no external redirects)
+- `search.html` — global search across teams, players, competitions, news
 
-- `frontend/` — static Netlify site
-- `backend/` — Node/Express service for live data and push notifications
-- `docs/PRODUCTION-CHECKLIST.md` — deployment and testing checklist
+## Structure
+- `css/styles.css` — single shared stylesheet (pitch-green / scoreboard theme)
+- `js/data.js` — **placeholder data only.** Replace the arrays in this file with real calls to your existing football-data.org / api-football integration. The shape of each object (`fixtures`, `news`, `players`, `searchIndex`) is what `app.js` expects, so keep the same fields if you swap in live data.
+- `js/app.js` — shared interactivity: date-strip switching, news filtering, live search-as-you-type
 
-## Current architecture
+## Rules this add-on follows
+- Official lineups are only shown once released (typically ~1 hour before kickoff); until then, show the empty state rather than a guess.
+- News stays inside MATCHDAY: no redirecting users to outside sites. Articles must be either originally reported and attributed to MATCHDAY, or content MATCHDAY is licensed to display.
+- Every page has a working empty state so it never looks broken when there's no data yet.
 
-Netlify frontend
-→ Matchday Railway backend
-→ football-data.org / TheSportsDB / API-Football / BBC RSS
+## Wiring it to real data
+`js/data.js` is intentionally isolated so you can:
+1. Replace `MOCK.fixtures` with a fetch to your existing `/api/fixtures` (or equivalent) endpoint, grouped by day.
+2. Replace `MOCK.news` and `MOCK.players` the same way.
+3. Leave `js/app.js` as-is unless you change field names — it only reads from the `MOCK` object.
 
-The frontend has a built-in snapshot as a fallback. The backend is the source for automatic refreshes.
-
-## Deploy the frontend
-
-Upload the contents of `frontend/` to Netlify.
-
-Current frontend backend URL:
-`https://matchday-push-production.up.railway.app`
-
-If you move the backend, update `PUSH_SERVER_URL` in `frontend/index.html`.
-
-## Deploy the backend
-
-Deploy the `backend/` directory to Railway, Render, Fly.io, or another always-on Node host.
-
-Required environment variables:
-
-- `VAPID_PUBLIC_KEY`
-- `VAPID_PRIVATE_KEY`
-
-Recommended:
-
-- `FOOTBALL_DATA_API_KEY`
-- `API_FOOTBALL_KEY`
-- `VAPID_CONTACT_EMAIL`
-- `SEASON=2026-2027`
-- `ALLOWED_ORIGINS=https://verdant-lamington-273898.netlify.app`
-
-Generate VAPID keys with:
-
-`npx web-push generate-vapid-keys`
-
-Never commit real API keys or `.env` files.
-
-## Health checks
-
-After deployment, open:
-
-- `/health` — backend diagnostics and football-data connectivity
-- `/api/status` — public non-secret service status
-- `/api/data` — live site data
-- `/vapid-public-key` — public push key
-
-## Important production note
-
-The backend currently uses JSON files for subscriptions and cached site data. This is suitable for testing/small deployments but should eventually be replaced with persistent database storage such as PostgreSQL.
-
-## Features already included
-
-- Fixtures and scores
-- Live score polling
-- League tables
-- Transfer/news feed
-- Where-to-watch section
-- Match detail stats/lineups/player stats
-- Accounts through Netlify Identity
-- Favourite/followed teams
-- Web push notifications
-- PWA/service worker
-- Automatic backend refresh
-- Fallback snapshot when the backend is unavailable
-
-## Next product upgrades
-
-1. Dedicated team pages
-2. Dedicated player pages
-3. Dedicated competition pages
-4. Global search
-5. Richer transfer cards with player/from/to/fee/status
-6. Persistent database storage
-7. User notification preferences
-8. Improved mobile bottom navigation
-9. More club/competition imagery and badges
-10. Production monitoring and error logging
+## Accessibility & responsiveness
+- Semantic headings, `aria-current` / `aria-pressed` state on toggles, visible focus states, skip-to-content link
+- Layout is responsive down to small phone widths (fixtures, stat grid, and nav all reflow)
+- Fonts: Oswald (headings) + Inter (body) via Google Fonts, both with system fallbacks if the request fails
